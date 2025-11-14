@@ -1,0 +1,59 @@
+use crate::core::cache::CacheManager;
+use crate::core::client::HttpClient;
+use crate::core::error::Result;
+use crate::models::apps::*;
+use std::sync::Arc;
+use tracing::instrument;
+
+pub struct AppsApi {
+    client: Arc<HttpClient>,
+    cache: Arc<CacheManager>,
+}
+
+impl AppsApi {
+    pub fn new(client: Arc<HttpClient>, cache: Arc<CacheManager>) -> Self {
+        Self { client, cache }
+    }
+
+    #[instrument(skip(self))]
+    pub async fn list_apps(&self) -> Result<Vec<App>> {
+        self.client.get("/apps").await
+    }
+
+    #[instrument(skip(self))]
+    pub async fn get_app(&self, app_id: i64) -> Result<App> {
+        let cache_key = CacheManager::build_key("app", &[&app_id.to_string()]);
+
+        if let Some(app) = self.cache.get(&cache_key).await {
+            return Ok(app);
+        }
+
+        let app: App = self.client.get(&format!("/apps/{}", app_id)).await?;
+
+        self.cache.set(cache_key, &app).await;
+        Ok(app)
+    }
+
+    #[instrument(skip(self, request))]
+    pub async fn create_app(&self, request: CreateAppRequest) -> Result<App> {
+        self.client.post("/apps", Some(&request)).await
+    }
+
+    #[instrument(skip(self, request))]
+    pub async fn update_app(&self, app_id: i64, request: UpdateAppRequest) -> Result<App> {
+        let cache_key = CacheManager::build_key("app", &[&app_id.to_string()]);
+        self.cache.invalidate(&cache_key).await;
+
+        self.client
+            .put(&format!("/apps/{}", app_id), Some(&request))
+            .await
+    }
+
+    #[instrument(skip(self))]
+    pub async fn delete_app(&self, app_id: i64) -> Result<()> {
+        let cache_key = CacheManager::build_key("app", &[&app_id.to_string()]);
+        self.cache.invalidate(&cache_key).await;
+
+        self.client.delete(&format!("/apps/{}", app_id)).await
+    }
+}
