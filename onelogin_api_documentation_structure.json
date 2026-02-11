@@ -1,0 +1,457 @@
+{
+  "onelogin_api_endpoints": {
+    "standard_behaviors": {
+      "authentication": {
+        "header": "Authorization",
+        "format": "bearer <access_token>",
+        "notes": "Access tokens are generated via OAuth2 /token endpoint and typically expire in 10 hours."
+      },
+      "rate_limiting": {
+        "limit": 5000,
+        "interval": "hour",
+        "headers": {
+          "limit": "X-RateLimit-Limit",
+          "remaining": "X-RateLimit-Remaining",
+          "reset": "X-RateLimit-Reset"
+        },
+        "notes": "Limit is account-wide, not per-token. Reset value is in seconds."
+      },
+      "pagination": {
+        "type": "cursor",
+        "param_name": "after_cursor",
+        "response_location": "pagination.after_cursor",
+        "default_limit": 50,
+        "max_limit": 1000,
+        "notes": "V1/V2 standard. If 'after_cursor' is null in response, iteration is complete."
+      }
+    },
+    "user_management": {
+      "onelogin_get_users": {
+        "method": "GET",
+        "endpoint": "/api/1/users",
+        "api_version": "v1",
+        "query_params": {
+          "limit": "integer (max 1000)",
+          "after_cursor": "string",
+          "username": "string (exact match)",
+          "email": "string"
+        },
+        "notes": "V1 API - Major pagination entry point. Supports filtering.",
+        "documentation_url": "https://developers.onelogin.com/api-docs/1/users/get-users"
+      },
+      "onelogin_get_user": {
+        "method": "GET",
+        "endpoint": "/api/2/users/:user_id",
+        "api_version": "v2",
+        "body_format": {},
+        "notes": "V2 API - Fetch single user details.",
+        "documentation_url": "https://developers.onelogin.com/api-docs/2/users/get-user"
+      },
+      "onelogin_create_user": {
+        "method": "POST",
+        "endpoint": "/api/2/users",
+        "api_version": "v2",
+        "body_format": {
+          "email": "string (required)",
+          "username": "string (required)",
+          "firstname": "string",
+          "lastname": "string"
+        },
+        "notes": "V2 API - Returns full user object.",
+        "documentation_url": "https://developers.onelogin.com/api-docs/2/users/create-user"
+      },
+      "onelogin_update_user": {
+        "method": "PUT",
+        "endpoint": "/api/2/users/:user_id",
+        "api_version": "v2",
+        "body_format": {
+          "firstname": "string (optional)",
+          "lastname": "string (optional)",
+          "email": "string (optional)"
+        },
+        "notes": "V2 API - Updates core profile data (not custom attributes).",
+        "documentation_url": "https://developers.onelogin.com/api-docs/2/users/update-user"
+      },
+      "onelogin_delete_user": {
+        "method": "DELETE",
+        "endpoint": "/api/2/users/:user_id",
+        "api_version": "v2",
+        "body_format": {},
+        "notes": "V2 API - Permanently deletes user.",
+        "documentation_url": "https://developers.onelogin.com/api-docs/2/users/delete-user"
+      },
+      "onelogin_assign_roles": {
+        "method": "PUT",
+        "endpoint": "/api/1/users/:user_id/add_roles",
+        "api_version": "v1",
+        "body_format": {
+          "role_id_array": ["array", "of", "role_ids"]
+        },
+        "notes": "V1 API - Uses role_id_array, not role_ids",
+        "documentation_url": "https://developers.onelogin.com/api-docs/1/users/assign-role-to-user"
+      },
+      "onelogin_remove_roles": {
+        "method": "PUT",
+        "endpoint": "/api/1/users/:user_id/remove_roles",
+        "api_version": "v1",
+        "body_format": {
+          "role_id_array": ["array", "of", "role_ids"]
+        },
+        "notes": "V1 API - Uses role_id_array, not role_ids",
+        "documentation_url": "https://developers.onelogin.com/api-docs/1/users/remove-role-from-user"
+      },
+      "onelogin_set_password": {
+        "method": "PUT",
+        "endpoint": "/api/1/users/set_password_clear_text/:user_id",
+        "api_version": "v1",
+        "body_format": {
+          "password": "string",
+          "password_confirmation": "string",
+          "validate_policy": "boolean (optional)"
+        },
+        "notes": "V1 API - Endpoint includes 'set_password_clear_text' in path BEFORE id.",
+        "documentation_url": "https://developers.onelogin.com/api-docs/1/users/set-password-in-cleartext"
+      },
+      "onelogin_set_custom_attributes": {
+        "method": "PUT",
+        "endpoint": "/api/1/users/:user_id/set_custom_attributes",
+        "api_version": "v1",
+        "body_format": {
+          "custom_attributes": {
+            "attribute_shortname": "value"
+          }
+        },
+        "notes": "V1 API - Uses shortname keys, not full attribute names",
+        "documentation_url": "https://developers.onelogin.com/api-docs/1/users/set-custom-attribute"
+      },
+      "onelogin_lock_user": {
+        "method": "PUT",
+        "endpoint": "/api/1/users/:user_id/lock_user",
+        "api_version": "v1",
+        "body_format": {
+          "locked_until": "integer (minutes)"
+        },
+        "notes": "V1 API - CAUTION: Path is '/lock_user' not '/lock'. Method is PUT.",
+        "documentation_url": "https://developers.onelogin.com/api-docs/1/users/lock-user"
+      },
+      "onelogin_unlock_user": {
+        "method": "POST",
+        "endpoint": "/api/2/users/:user_id/unlock",
+        "api_version": "v2",
+        "body_format": {},
+        "notes": "V2 API - No body required",
+        "documentation_url": "https://developers.onelogin.com/api-docs/2/users/unlock-user"
+      },
+      "onelogin_logout_user": {
+        "method": "POST",
+        "endpoint": "/api/1/users/:user_id/logout",
+        "api_version": "v1",
+        "body_format": {},
+        "notes": "V1 API - Logs user out of all sessions",
+        "documentation_url": "https://developers.onelogin.com/api-docs/1/users/log-user-out"
+      },
+      "onelogin_get_enrolled_factors": {
+        "method": "GET",
+        "endpoint": "/api/1/users/:user_id/otp_devices",
+        "api_version": "v1",
+        "body_format": {},
+        "notes": "V1 API - Returns list of registered MFA devices.",
+        "documentation_url": "https://developers.onelogin.com/api-docs/1/mfa/get-enrolled-factors"
+      },
+      "onelogin_remove_factor": {
+        "method": "DELETE",
+        "endpoint": "/api/1/users/:user_id/otp_devices/:device_id",
+        "api_version": "v1",
+        "body_format": {},
+        "notes": "V1 API - Removes a specific MFA device (reset MFA).",
+        "documentation_url": "https://developers.onelogin.com/api-docs/1/mfa/remove-enrolled-factor"
+      }
+    },
+    "role_management": {
+      "onelogin_get_roles": {
+        "method": "GET",
+        "endpoint": "/api/2/roles",
+        "api_version": "v2",
+        "query_params": {
+          "limit": "integer",
+          "after_cursor": "string",
+          "name": "string"
+        },
+        "notes": "V2 API - Necessary to find role_ids for assignment.",
+        "documentation_url": "https://developers.onelogin.com/api-docs/2/roles/list-roles"
+      },
+      "onelogin_get_role": {
+        "method": "GET",
+        "endpoint": "/api/2/roles/:role_id",
+        "api_version": "v2",
+        "body_format": {},
+        "notes": "V2 API - Get single role details.",
+        "documentation_url": "https://developers.onelogin.com/api-docs/2/roles/get-role"
+      },
+      "onelogin_create_role": {
+        "method": "POST",
+        "endpoint": "/api/2/roles",
+        "api_version": "v2",
+        "body_format": {
+          "name": "string (required)",
+          "description": "string (optional)"
+        },
+        "notes": "V2 API - Returns role object with id",
+        "documentation_url": "https://developers.onelogin.com/api-docs/2/roles/create-role"
+      },
+      "onelogin_update_role": {
+        "method": "PUT",
+        "endpoint": "/api/2/roles/:role_id",
+        "api_version": "v2",
+        "body_format": {
+          "name": "string (optional)",
+          "description": "string (optional)"
+        },
+        "notes": "V2 API - Partial update supported",
+        "documentation_url": "https://developers.onelogin.com/api-docs/2/roles/update-role"
+      },
+      "onelogin_delete_role": {
+        "method": "DELETE",
+        "endpoint": "/api/2/roles/:role_id",
+        "api_version": "v2",
+        "body_format": {},
+        "notes": "V2 API - No body required",
+        "documentation_url": "https://developers.onelogin.com/api-docs/2/roles/delete-role"
+      },
+      "onelogin_add_role_users": {
+        "method": "POST",
+        "endpoint": "/api/2/roles/:role_id/users",
+        "api_version": "v2",
+        "body_format": ["array", "of", "user_ids"],
+        "notes": "V2 API - Body is array of user IDs (not object)",
+        "documentation_url": "https://developers.onelogin.com/api-docs/2/roles/add-role-users"
+      },
+      "onelogin_remove_role_users": {
+        "method": "DELETE",
+        "endpoint": "/api/2/roles/:role_id/users",
+        "api_version": "v2",
+        "body_format": ["array", "of", "user_ids"],
+        "notes": "V2 API - Body is array of user IDs (not object)",
+        "documentation_url": "https://developers.onelogin.com/api-docs/2/roles/remove-role-users"
+      }
+    },
+    "group_management": {
+      "onelogin_get_groups": {
+        "method": "GET",
+        "endpoint": "/api/1/groups",
+        "api_version": "v1",
+        "query_params": {
+          "after_cursor": "string"
+        },
+        "body_format": {},
+        "notes": "V1 API - Returns list of groups. Supports cursor pagination.",
+        "documentation_url": "https://developers.onelogin.com/api-docs/1/groups/get-groups"
+      },
+      "onelogin_get_group": {
+        "method": "GET",
+        "endpoint": "/api/1/groups/:group_id",
+        "api_version": "v1",
+        "body_format": {},
+        "notes": "V1 API - Groups use V1 endpoints",
+        "documentation_url": "https://developers.onelogin.com/api-docs/1/groups/get-group"
+      },
+      "onelogin_create_group": {
+        "method": "POST",
+        "endpoint": "/api/1/groups",
+        "api_version": "v1",
+        "body_format": {
+          "name": "string (required)",
+          "reference": "string (optional)"
+        },
+        "notes": "V1 API - Groups are managed through V1 API only",
+        "documentation_url": "https://developers.onelogin.com/api-docs/1/groups/create-group"
+      },
+      "onelogin_update_group": {
+        "method": "PUT",
+        "endpoint": "/api/1/groups/:group_id",
+        "api_version": "v1",
+        "body_format": {
+          "name": "string (optional)",
+          "reference": "string (optional)"
+        },
+        "notes": "V1 API - Partial update supported",
+        "documentation_url": "https://developers.onelogin.com/api-docs/1/groups/update-group"
+      },
+      "onelogin_delete_group": {
+        "method": "DELETE",
+        "endpoint": "/api/1/groups/:group_id",
+        "api_version": "v1",
+        "body_format": {},
+        "notes": "V1 API - No body required",
+        "documentation_url": "https://developers.onelogin.com/api-docs/1/groups/delete-group"
+      }
+    },
+    "app_management": {
+      "onelogin_get_apps": {
+        "method": "GET",
+        "endpoint": "/api/2/apps",
+        "api_version": "v2",
+        "query_params": {
+          "limit": "integer",
+          "page": "integer (V2 uses page/cursor mix depending on endpoint)",
+          "name": "string"
+        },
+        "notes": "V2 API - Necessary to find app_ids.",
+        "documentation_url": "https://developers.onelogin.com/api-docs/2/apps/list-apps"
+      },
+      "onelogin_list_connectors": {
+        "method": "GET",
+        "endpoint": "/api/2/connectors",
+        "api_version": "v2",
+        "query_params": {
+          "name": "string",
+          "auth_method": "string"
+        },
+        "notes": "V2 API - returns list of connectors (Salesforce, OIDC, etc). Needed to get connector_id for app creation.",
+        "documentation_url": "https://developers.onelogin.com/api-docs/2/connectors/list-connectors"
+      },
+      "onelogin_create_app": {
+        "method": "POST",
+        "endpoint": "/api/2/apps",
+        "api_version": "v2",
+        "body_format": {
+          "connector_id": "integer (required)",
+          "name": "string (required)"
+        },
+        "notes": "V2 API - Requires connector_id (find via connector lookup).",
+        "documentation_url": "https://developers.onelogin.com/api-docs/2/apps/create-app"
+      },
+      "onelogin_update_app": {
+        "method": "PUT",
+        "endpoint": "/api/2/apps/:app_id",
+        "api_version": "v2",
+        "body_format": {
+          "name": "string (optional)",
+          "description": "string (optional)",
+          "visible": "boolean (optional)",
+          "parameters": "object (optional)",
+          "configuration": "object (optional)"
+        },
+        "notes": "V2 API - Complex object with app-specific configuration",
+        "documentation_url": "https://developers.onelogin.com/api-docs/2/apps/update-app"
+      },
+      "onelogin_delete_app": {
+        "method": "DELETE",
+        "endpoint": "/api/2/apps/:app_id",
+        "api_version": "v2",
+        "body_format": {},
+        "notes": "V2 API - No body required",
+        "documentation_url": "https://developers.onelogin.com/api-docs/2/apps/delete-app"
+      }
+    },
+    "user_mappings": {
+      "onelogin_get_mappings": {
+        "method": "GET",
+        "endpoint": "/api/2/mappings",
+        "api_version": "v2",
+        "body_format": {},
+        "notes": "V2 API - Returns all mappings.",
+        "documentation_url": "https://developers.onelogin.com/api-docs/2/user-mappings/list-mappings"
+      },
+      "onelogin_create_user_mapping": {
+        "method": "POST",
+        "endpoint": "/api/2/mappings",
+        "api_version": "v2",
+        "body_format": {
+          "name": "string (required)",
+          "match": "string (required - 'all' or 'any')",
+          "enabled": "boolean (required)",
+          "position": "integer or null",
+          "conditions": [
+            {
+              "source": "string (e.g., 'email', 'custom_attribute_city')",
+              "operator": "string (e.g., '=', '~', '!=')",
+              "value": "string"
+            }
+          ],
+          "actions": [
+            {
+              "action": "string (e.g., 'add_role', 'set_status')",
+              "value": "string or array"
+            }
+          ]
+        },
+        "notes": "V2 API - Complex object with conditions and actions arrays",
+        "documentation_url": "https://developers.onelogin.com/api-docs/2/user-mappings/create-mapping"
+      },
+      "onelogin_update_user_mapping": {
+        "method": "PUT",
+        "endpoint": "/api/2/mappings/:mapping_id",
+        "api_version": "v2",
+        "body_format": {
+          "name": "string (optional)",
+          "match": "string (optional)",
+          "enabled": "boolean (optional)",
+          "position": "integer or null (optional)",
+          "conditions": "array (optional)",
+          "actions": "array (optional)"
+        },
+        "notes": "V2 API - Same structure as create, partial update supported",
+        "documentation_url": "https://developers.onelogin.com/api-docs/2/user-mappings/update-mapping"
+      },
+      "onelogin_delete_user_mapping": {
+        "method": "DELETE",
+        "endpoint": "/api/2/mappings/:mapping_id",
+        "api_version": "v2",
+        "body_format": {},
+        "notes": "V2 API - No body required",
+        "documentation_url": "https://developers.onelogin.com/api-docs/2/user-mappings/delete-mapping"
+      },
+      "onelogin_sort_mapping_order": {
+        "method": "PUT",
+        "endpoint": "/api/2/mappings/sort",
+        "api_version": "v2",
+        "body_format": ["array", "of", "mapping_ids", "in", "order"],
+        "notes": "V2 API - Body is array of mapping IDs in desired order",
+        "documentation_url": "https://developers.onelogin.com/api-docs/2/user-mappings/bulk-sort"
+      }
+    },
+    "custom_attributes": {
+      "onelogin_update_custom_attribute": {
+        "method": "PUT",
+        "endpoint": "/api/2/users/custom_attributes/:attribute_id",
+        "api_version": "v2",
+        "body_format": {
+          "name": "string (optional)",
+          "shortname": "string (optional)"
+        },
+        "notes": "V2 API - Updates attribute definition, not values",
+        "documentation_url": "https://developers.onelogin.com/api-docs/2/users/update-custom-attribute"
+      }
+    },
+    "events": {
+      "onelogin_get_events": {
+        "method": "GET",
+        "endpoint": "/api/1/events",
+        "api_version": "v1",
+        "query_params": {
+          "since": "string (ISO8601)",
+          "until": "string (ISO8601)",
+          "event_type_id": "integer",
+          "user_id": "integer"
+        },
+        "notes": "V1 API - Critical for audit trails. Cursor pagination supported.",
+        "documentation_url": "https://developers.onelogin.com/api-docs/1/events/get-events"
+      }
+    }
+  },
+  "critical_findings": {
+    "api_version_mismatch": "Functions are using V2 endpoints when V1 is required (users, groups) or vice versa",
+    "parameter_naming": "V1 API uses different parameter names (role_id_array vs role_ids)",
+    "endpoint_paths": "Lock User endpoint is '/lock_user' (PUT), not '/lock'. Set Password uses 'set_password_clear_text' in path.",
+    "body_structure": "Some endpoints expect arrays directly (Role/App assignments), not wrapped in objects",
+    "pagination_handling": "V1/V2 endpoints use 'after_cursor' in query params and return a 'pagination' object. Loop until 'after_cursor' is null.",
+    "mfa_handling": "MFA operations (reset) are strictly V1 and require 'Manage All' scope.",
+    "scope_requirements": {
+      "password_operations": "Requires 'Manage All' scope only",
+      "role_assignment": "Requires 'Manage All' scope only",
+      "lock_user": "Requires 'Manage All' scope only",
+      "user_crud": "Can use 'Manage Users' or 'Manage All' scope"
+    }
+  }
+}
