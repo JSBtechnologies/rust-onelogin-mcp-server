@@ -1,6 +1,6 @@
-# Claude Desktop Integration Guide
+# MCP Client Integration Guide
 
-This guide explains how to integrate the OneLogin MCP Server with Claude Desktop.
+This guide explains how to integrate the OneLogin MCP Server with MCP-compatible clients including Claude Desktop, Gemini CLI, and others.
 
 ## Quick Setup (Recommended)
 
@@ -34,7 +34,7 @@ In Claude, ask:
 What MCP tools do you have available?
 ```
 
-You should see 177 OneLogin tools listed.
+You should see 154 OneLogin tools listed.
 
 ## Manual Setup
 
@@ -329,6 +329,54 @@ Show me all users who haven't logged in for the last 90 days
 List all privileged users and their assigned privileges
 ```
 
+## Multi-Tenant Usage
+
+If you've configured a `tenants.json` file (see [README.md](README.md#multi-tenant-configuration)), you can target specific tenants in your requests.
+
+### List Configured Tenants
+
+Ask your AI assistant:
+```
+List all configured OneLogin tenants
+```
+
+This uses the `onelogin_list_tenants` tool to show tenant names, subdomains, regions, and which is the default.
+
+### Target a Specific Tenant
+
+Ask your AI assistant:
+```
+Show me the first 10 users from the staging tenant
+```
+
+Or specify the tenant in a tool call:
+```json
+{
+  "name": "onelogin_list_users",
+  "arguments": {
+    "tenant": "staging",
+    "limit": 10
+  }
+}
+```
+
+### Cross-Tenant Operations
+
+You can compare or sync across tenants:
+```
+Compare the roles in the production tenant with the staging tenant
+```
+
+```
+List all apps in production that don't exist in staging
+```
+
+The AI assistant will make separate calls with different `tenant` values and compare the results.
+
+### Default Tenant Behavior
+
+When you don't specify a tenant, the default tenant is used (the one marked `"default": true` in `tenants.json`, or the first entry if none is marked). Single-tenant mode (env vars only, no `tenants.json`) works exactly as before — no `tenant` parameter appears in tool schemas.
+
 ## Troubleshooting
 
 ### Claude Doesn't See the Tools
@@ -476,7 +524,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | \
 3. **Use specific queries** instead of listing all data
 4. **Batch operations** when creating multiple resources
 
-## Available Tools (177)
+## Available Tools (154)
 
 See the full list in Claude by asking:
 ```
@@ -502,13 +550,16 @@ Or check the documentation:
 
 ---
 
-**You're all set!** Claude now has access to 177 OneLogin tools across 28 API domains for complete API automation.
+**You're all set!** Claude now has access to 154 OneLogin tools across 28 API domains for complete API automation.
 
 ---
 
 ## Other MCP Clients
 
-This server works with any MCP-compatible client, not just Claude Desktop. To use with other clients:
+This server works with any MCP-compatible client, not just Claude Desktop:
 
 - **Claude Code CLI** - Add the server to your Claude Code MCP settings
-- **Other MCP clients** - Configure with the same binary path and environment variables
+- **Gemini CLI** - Configure with the same binary path and environment variables
+- **Other MCP clients** - Any client that supports the Model Context Protocol can use this server
+
+Credentials are kept separate from client configuration via `.env` (single-tenant) or `tenants.json` (multi-tenant), so the same server setup works across all MCP clients without duplicating secrets.

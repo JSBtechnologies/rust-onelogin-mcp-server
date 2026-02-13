@@ -1,9 +1,5 @@
-use crate::api::OneLoginClient;
-use crate::core::auth::AuthManager;
-use crate::core::cache::CacheManager;
-use crate::core::client::HttpClient;
 use crate::core::config::Config;
-use crate::core::rate_limit::RateLimiter;
+use crate::core::tenant_manager::TenantManager;
 use crate::core::tool_config::ToolConfig;
 use crate::mcp::tools::ToolRegistry;
 use anyhow::{anyhow, Context, Result};
@@ -16,7 +12,7 @@ use tracing::{debug, error, info};
 #[allow(dead_code)]
 pub struct McpServer {
     config: Arc<Config>,
-    client: Arc<OneLoginClient>,
+    tenant_manager: Arc<TenantManager>,
     tool_registry: ToolRegistry,
     tool_config: Arc<ToolConfig>,
 }
@@ -36,7 +32,7 @@ struct IncomingFrame {
 #[allow(dead_code)]
 impl McpServer {
     pub async fn new(config: Config) -> Result<Self> {
-        let config = Arc::new(config);
+        let config_arc = Arc::new(config.clone());
 
         // Initialize tool configuration (controls which tools are enabled)
         let tool_config = Arc::new(
@@ -44,27 +40,37 @@ impl McpServer {
                 .context("Failed to load tool configuration")?
         );
 
-        // Initialize auth manager
-        let auth_manager = Arc::new(AuthManager::new(config.clone()));
+        // Determine single vs multi-tenant mode
+        let tenant_manager = match Config::load_tenants_file()? {
+            Some(tenants_file) if !tenants_file.tenants.is_empty() => {
+                info!(
+                    "Multi-tenant mode: {} tenant(s) configured",
+                    tenants_file.tenants.len()
+                );
+                for t in &tenants_file.tenants {
+                    info!(
+                        "  Tenant '{}': subdomain={}, region={}{}",
+                        t.name, t.subdomain, t.region,
+                        if t.default { " (default)" } else { "" }
+                    );
+                }
+                Arc::new(
+                    TenantManager::from_entries(&tenants_file.tenants, &config)
+                        .context("Failed to initialize multi-tenant manager")?
+                )
+            }
+            _ => {
+                info!("Single-tenant mode (credentials from environment)");
+                Arc::new(TenantManager::from_single(config))
+            }
+        };
 
-        // Initialize rate limiter
-        let rate_limiter = Arc::new(RateLimiter::new(config.rate_limit_requests_per_second));
-
-        // Initialize HTTP client
-        let http_client = Arc::new(HttpClient::new(config.clone(), auth_manager, rate_limiter));
-
-        // Initialize cache
-        let cache = Arc::new(CacheManager::new(config.cache_ttl_seconds, 10000));
-
-        // Initialize OneLogin API client
-        let client = Arc::new(OneLoginClient::new(http_client, cache));
-
-        // Initialize tool registry with tool config for filtering
-        let tool_registry = ToolRegistry::new(client.clone(), tool_config.clone());
+        // Initialize tool registry with tenant manager and tool config
+        let tool_registry = ToolRegistry::new(tenant_manager.clone(), tool_config.clone());
 
         Ok(Self {
-            config,
-            client,
+            config: config_arc,
+            tenant_manager,
             tool_registry,
             tool_config,
         })

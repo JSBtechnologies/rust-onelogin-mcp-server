@@ -44,18 +44,39 @@ async fn run_server() -> Result<()> {
     info!("Logs are written to stderr, MCP messages to stdout");
 
     // Load configuration
-    info!("Loading configuration from environment variables...");
-    let config = Config::from_env().context(
-        "Failed to load configuration from environment variables.\n\
-         \n\
-         Required environment variables:\n\
-         - ONELOGIN_CLIENT_ID: Your OneLogin API client ID\n\
-         - ONELOGIN_CLIENT_SECRET: Your OneLogin API client secret\n\
-         - ONELOGIN_REGION: Your OneLogin region (us or eu)\n\
-         - ONELOGIN_SUBDOMAIN: Your OneLogin subdomain\n\
-         \n\
-         Please ensure all required environment variables are set and valid."
-    )?;
+    info!("Loading configuration...");
+    let config = match Config::from_env() {
+        Ok(c) => {
+            info!("Configuration loaded from environment variables");
+            c
+        }
+        Err(env_err) => {
+            // If env vars are missing but tenants.json exists, use base config
+            match Config::load_tenants_file() {
+                Ok(Some(tenants)) if !tenants.tenants.is_empty() => {
+                    info!(
+                        "Credentials not in env vars, using tenants.json ({} tenant(s))",
+                        tenants.tenants.len()
+                    );
+                    Config::from_env_base().context(
+                        "Failed to load base configuration for multi-tenant mode"
+                    )?
+                }
+                _ => {
+                    return Err(env_err.context(
+                        "Failed to load configuration.\n\
+                         \n\
+                         Either set environment variables:\n\
+                         - ONELOGIN_CLIENT_ID, ONELOGIN_CLIENT_SECRET\n\
+                         - ONELOGIN_REGION, ONELOGIN_SUBDOMAIN\n\
+                         \n\
+                         Or create a tenants.json file for multi-tenant mode.\n\
+                         See documentation for details."
+                    ));
+                }
+            }
+        }
+    };
     info!(
         "Configuration loaded successfully: region={:?}, subdomain={}",
         config.onelogin_region, config.onelogin_subdomain

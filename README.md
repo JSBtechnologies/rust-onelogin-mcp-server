@@ -7,7 +7,7 @@
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![API Domains](https://img.shields.io/badge/API%20Domains-28-brightgreen.svg)](#api-coverage)
-[![Tools](https://img.shields.io/badge/Tools-177-blue.svg)](#api-coverage)
+[![Tools](https://img.shields.io/badge/Tools-154-blue.svg)](#api-coverage)
 
 [Features](#features) • [Quick Start](#quick-start) • [Tool Configuration](#tool-configuration) • [CLI Commands](#cli-commands) • [API Coverage](#api-coverage) • [Contributing](#contributing)
 
@@ -17,15 +17,16 @@
 
 ## Overview
 
-A production-ready MCP server implementation providing comprehensive coverage of the OneLogin API across 28 API domains. Built in Rust for performance, reliability, and type safety, this server exposes 177 tools through the Model Context Protocol for seamless integration with AI assistants and automation workflows.
+A production-ready MCP server implementation providing comprehensive coverage of the OneLogin API across 28 API domains. Built in Rust for performance, reliability, and type safety, this server exposes 154 tools through the Model Context Protocol for seamless integration with AI assistants and automation workflows.
 
 ### Key Features
 
 - ✅ **Comprehensive API Coverage** - 28 OneLogin API domains fully implemented
-- 🚀 **177 MCP Tools** - Complete OneLogin capabilities accessible via MCP protocol
+- 🚀 **154 MCP Tools** - Complete OneLogin capabilities accessible via MCP protocol
 - ⚡ **High Performance** - Built with Tokio async runtime for concurrent operations
 - 🔒 **Secure** - OAuth 2.0 token management, TLS encryption, secret handling
 - 📊 **Production Ready** - Rate limiting, caching, circuit breaker, comprehensive error handling
+- 🏢 **Multi-Tenant** - Manage multiple OneLogin tenants from a single server instance
 - 🎯 **Migration Focused** - Special features for OneLogin migration scenarios
 - 🛠️ **Type Safe** - Full Rust type system ensures reliability
 - 📝 **Well Documented** - Extensive inline documentation and usage examples
@@ -280,8 +281,8 @@ This server provides comprehensive coverage of the OneLogin API across 28 domain
 | Domain | Tools | Description |
 |--------|-------|-------------|
 | 👤 **Users** | 14 | Complete user lifecycle management |
-| 🎭 **Roles** | 11 | Role-based access control (includes role apps, users, admins) |
-| 👥 **Groups** | 2 | Group management (read-only) |
+| 🎭 **Roles** | 5 | Role CRUD and management |
+| 👥 **Groups** | 5 | Group CRUD management |
 
 ### Application & Access
 | Domain | Tools | Description |
@@ -297,9 +298,10 @@ This server provides comprehensive coverage of the OneLogin API across 28 domain
 ### Advanced Security
 | Domain | Tools | Description |
 |--------|-------|-------------|
-| ⚡ **Smart Hooks** | 8 | Custom authentication logic (JavaScript) |
+| ⚡ **Smart Hooks** | 11 | Custom authentication logic + hook environment variables |
 | 🛡️ **Vigilance AI** | 8 | Real-time risk scoring and Smart MFA |
 | 🔓 **Login/Session** | 3 | Authentication flows and session management |
+| 🎯 **Risk** | 1 | Get individual risk rule details |
 
 ### Administration & Governance
 | Domain | Tools | Description |
@@ -307,6 +309,7 @@ This server provides comprehensive coverage of the OneLogin API across 28 domain
 | 👑 **Privileges** | 7 | Delegated administration privileges |
 | 🏷️ **Custom Attributes** | 4 | Custom user fields and metadata |
 | 📊 **Reports** | 4 | Run and retrieve reports |
+| 🎭 **Role Resources** | 6 | Role apps, users, and admin assignments |
 
 ### Provisioning & Integration
 | Domain | Tools | Description |
@@ -319,13 +322,12 @@ This server provides comprehensive coverage of the OneLogin API across 28 domain
 | Domain | Tools | Description |
 |--------|-------|-------------|
 | ✉️ **Invitations** | 2 | User invitation management |
-| 🎨 **Branding** | 10 | Account branding and message templates |
+| 🎨 **Branding** | 12 | Account branding, email settings, and message templates |
 
 ### Monitoring & Events
 | Domain | Tools | Description |
 |--------|-------|-------------|
 | 📊 **Events** | 4 | Audit logs and event tracking |
-| 🪝 **Webhooks** | 7 | Webhook management (CRUD, test, events) |
 
 ### Developer Tools
 | Domain | Tools | Description |
@@ -333,18 +335,9 @@ This server provides comprehensive coverage of the OneLogin API across 28 domain
 | 🔧 **API Authorization** | 5 | API auth server configuration |
 | 🎁 **Embed Tokens** | 2 | SSO embedding capabilities |
 | 📈 **Rate Limits** | 2 | API rate limit status |
+| 🏢 **Tenant Management** | 1 | List configured tenants (multi-tenant mode) |
 
-### Account & Security
-| Domain | Tools | Description |
-|--------|-------|-------------|
-| ⚙️ **Account Settings** | 4 | Account configuration and usage |
-| 🔑 **Password Policies** | 4 | Password policy management |
-| 📜 **Certificates** | 4 | Certificate management |
-| 📱 **Device Trust** | 5 | Device registration and management |
-| 🖥️ **Login Pages** | 5 | Custom login page management |
-| 🤝 **Trusted IDPs** | 8 | Trusted identity provider configuration |
-
-**Total: 28 API Domains • 177 Tools**
+**Total: 28 API Domains • 154 Tools**
 
 ## Architecture
 
@@ -354,19 +347,18 @@ This server provides comprehensive coverage of the OneLogin API across 28 domain
 ┌─────────────────────────────────────────────────────────────┐
 │                    MCP Server (JSON-RPC)                     │
 ├─────────────────────────────────────────────────────────────┤
-│                   Tool Registry (177 tools)                  │
+│                   Tool Registry (154 tools)                  │
 ├─────────────────────────────────────────────────────────────┤
-│                   OneLogin API Client                        │
-│  ┌──────────┬──────────┬──────────┬──────────┬───────────┐ │
-│  │  Users   │  Smart   │Vigilance │  Roles   │    ...    │ │
-│  │   API    │  Hooks   │   API    │   API    │  21 more  │ │
-│  └──────────┴──────────┴──────────┴──────────┴───────────┘ │
-├─────────────────────────────────────────────────────────────┤
-│                     Core Infrastructure                      │
-│  ┌────────┬──────────┬─────────┬────────────┬───────────┐  │
-│  │ Auth   │  HTTP    │  Cache  │Rate Limit  │  Circuit  │  │
-│  │Manager │  Client  │         │            │  Breaker  │  │
-│  └────────┴──────────┴─────────┴────────────┴───────────┘  │
+│                     Tenant Manager                           │
+│    ┌─────────────────────┐  ┌─────────────────────┐        │
+│    │   Tenant: prod      │  │   Tenant: staging   │  ...   │
+│    │  ┌───────────────┐  │  │  ┌───────────────┐  │        │
+│    │  │ OneLogin API  │  │  │  │ OneLogin API  │  │        │
+│    │  │    Client     │  │  │  │    Client     │  │        │
+│    │  ├───────────────┤  │  │  ├───────────────┤  │        │
+│    │  │Auth│HTTP│Cache│  │  │  │Auth│HTTP│Cache│  │        │
+│    │  └───────────────┘  │  │  └───────────────┘  │        │
+│    └─────────────────────┘  └─────────────────────┘        │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -376,12 +368,13 @@ This server provides comprehensive coverage of the OneLogin API across 28 domain
 ### Key Components
 
 - **MCP Server** - Handles JSON-RPC protocol, routes tool calls
-- **Tool Registry** - Manages 177 tool definitions and execution
+- **Tool Registry** - Manages 154 tool definitions and execution
+- **Tenant Manager** - Multi-tenant client resolution with per-tenant isolation
 - **API Clients** - 28 domain-specific API clients with typed models
-- **Auth Manager** - OAuth 2.0 token lifecycle management
+- **Auth Manager** - OAuth 2.0 token lifecycle management (per tenant)
 - **HTTP Client** - Connection pooling, retry logic, error handling
-- **Cache Layer** - Moka-based caching with configurable TTL
-- **Rate Limiter** - Governor-based rate limiting
+- **Cache Layer** - Moka-based caching with configurable TTL (per tenant)
+- **Rate Limiter** - Governor-based rate limiting (per tenant)
 - **Circuit Breaker** - Fault tolerance for API failures
 
 ### Technology Stack
@@ -408,6 +401,79 @@ This server provides comprehensive coverage of the OneLogin API across 28 domain
 | `RATE_LIMIT_RPS` | No | `10` | Requests per second limit |
 | `ENABLE_METRICS` | No | `false` | Enable Prometheus metrics |
 | `ONELOGIN_MCP_CONFIG` | No | Platform default | Custom path to tool config file |
+| `ONELOGIN_TENANTS_CONFIG` | No | Platform default | Custom path to tenants.json for multi-tenant mode |
+
+### Multi-Tenant Configuration
+
+The server supports managing multiple OneLogin tenants from a single instance. This is useful when you manage production and staging environments, multiple business units, or need cross-tenant operations.
+
+#### Setup
+
+Create a `tenants.json` file:
+
+| Platform | Default Location |
+|----------|------------------|
+| **macOS** | `~/Library/Application Support/onelogin-mcp/tenants.json` |
+| **Linux** | `~/.config/onelogin-mcp/tenants.json` |
+| **Windows** | `C:\Users\<User>\AppData\Roaming\onelogin-mcp\tenants.json` |
+
+Override with `ONELOGIN_TENANTS_CONFIG` environment variable.
+
+#### tenants.json Format
+
+```json
+{
+    "tenants": [
+        {
+            "name": "production",
+            "client_id": "your_prod_client_id",
+            "client_secret": "your_prod_client_secret",
+            "region": "us",
+            "subdomain": "mycompany",
+            "default": true
+        },
+        {
+            "name": "staging",
+            "client_id": "your_staging_client_id",
+            "client_secret": "your_staging_client_secret",
+            "region": "us",
+            "subdomain": "mycompany-staging"
+        }
+    ]
+}
+```
+
+#### Usage
+
+When multi-tenant mode is active, every tool accepts an optional `tenant` parameter:
+
+```json
+{
+  "name": "onelogin_list_users",
+  "arguments": {
+    "tenant": "staging",
+    "limit": 10
+  }
+}
+```
+
+Omitting `tenant` (or passing an empty string) uses the default tenant.
+
+Use `onelogin_list_tenants` to see all configured tenants:
+
+```json
+{
+  "name": "onelogin_list_tenants",
+  "arguments": {}
+}
+```
+
+#### Backward Compatibility
+
+- **Single-tenant mode**: If no `tenants.json` exists, the server uses environment variables (`ONELOGIN_CLIENT_ID`, etc.) exactly as before. No `tenant` parameter appears in tool schemas.
+- **Multi-tenant mode**: When `tenants.json` is present, the server loads all tenants from the file. Environment variable credentials (`ONELOGIN_CLIENT_ID`, etc.) are not required — only shared operational settings (`CACHE_TTL_SECONDS`, `RATE_LIMIT_RPS`, etc.) are read from env vars.
+
+Each tenant gets its own isolated authentication, rate limiting, and caching stack.
 
 ### Getting OneLogin API Credentials
 
@@ -419,7 +485,7 @@ This server provides comprehensive coverage of the OneLogin API across 28 domain
 
 ## Tool Configuration
 
-The MCP server supports fine-grained control over which tools are enabled. By default, ~46 core tools are enabled while ~99 specialized tools are disabled.
+The MCP server supports fine-grained control over which tools are enabled. By default, 46 core tools are enabled while 108 specialized tools are disabled.
 
 ### Configuration File Location
 
@@ -433,20 +499,20 @@ Override with `ONELOGIN_MCP_CONFIG` environment variable.
 
 ### Default Configuration
 
-**Enabled by Default (~46 tools):**
+**Enabled by Default (46 tools):**
 - `users` - Core identity management (14 tools)
 - `apps` - Application management (5 tools)
 - `roles` - Role-based access control (5 tools)
-- `groups` - Group management (2 tools)
+- `groups` - Group management (5 tools)
 - `connectors` - App connector templates (2 tools)
 - `custom_attributes` - Custom user fields (4 tools)
 - `invitations` - User onboarding (2 tools)
 - `events` - Audit logs (4 tools)
 - `reports` - Monitoring reports (4 tools)
-- `webhooks` - Webhook management (1 tool)
+- `tenant_management` - List configured tenants (1 tool)
 
-**Disabled by Default (~99 tools):**
-- `app_rules`, `mfa`, `saml`, `smart_hooks`, `vigilance`, `privileges`, `user_mappings`, `embed_tokens`, `oauth`, `oidc`, `directories`, `branding`, `self_registration`, `login`, `api_auth`
+**Disabled by Default (108 tools):**
+- `app_rules`, `mfa`, `saml`, `smart_hooks`, `vigilance`, `privileges`, `user_mappings`, `embed_tokens`, `oauth`, `oidc`, `directories`, `branding`, `self_registration`, `login`, `api_auth`, `role_resources`, `rate_limits`, `risk`
 
 ### Configuration File Format
 
@@ -595,6 +661,7 @@ onelogin-mcp-server/
     │   ├── auth.rs             # OAuth token management
     │   ├── client.rs           # HTTP client
     │   ├── config.rs           # Configuration
+    │   ├── tenant_manager.rs   # Multi-tenant client management
     │   ├── tool_config.rs      # Tool enable/disable configuration
     │   ├── error.rs            # Error types
     │   ├── cache.rs            # Caching layer

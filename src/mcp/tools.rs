@@ -1,5 +1,6 @@
 use crate::api::OneLoginClient;
 use crate::core::error::OneLoginError;
+use crate::core::tenant_manager::TenantManager;
 use crate::core::tool_config::ToolConfig;
 use crate::models::events::EventQueryParams;
 use crate::models::roles::CreateRoleRequest;
@@ -19,7 +20,7 @@ fn value_as_i64(v: &Value) -> Option<i64> {
 
 #[allow(dead_code)]
 pub struct ToolRegistry {
-    client: Arc<OneLoginClient>,
+    tenant_manager: Arc<TenantManager>,
     tool_config: Arc<ToolConfig>,
 }
 
@@ -40,8 +41,46 @@ struct ListUsersArgs {
 
 #[allow(dead_code)]
 impl ToolRegistry {
-    pub fn new(client: Arc<OneLoginClient>, tool_config: Arc<ToolConfig>) -> Self {
-        Self { client, tool_config }
+    pub fn new(tenant_manager: Arc<TenantManager>, tool_config: Arc<ToolConfig>) -> Self {
+        Self { tenant_manager, tool_config }
+    }
+
+    /// Extract the optional "tenant" parameter from tool args and resolve to the correct client.
+    fn resolve_client(&self, args: &Value) -> Result<Arc<OneLoginClient>> {
+        let tenant = args.get("tenant").and_then(|v| v.as_str());
+        self.tenant_manager.resolve(tenant)
+    }
+
+    /// Inject the optional "tenant" parameter into a tool's inputSchema when in multi-tenant mode.
+    fn with_tenant_param(&self, mut tool: Value) -> Value {
+        if !self.tenant_manager.is_multi_tenant() {
+            return tool;
+        }
+
+        let tenant_names: Vec<String> = self.tenant_manager
+            .tenant_info()
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+
+        let default_name = self.tenant_manager.default_tenant_name();
+
+        if let Some(schema) = tool.get_mut("inputSchema") {
+            if let Some(props) = schema.get_mut("properties") {
+                if let Some(obj) = props.as_object_mut() {
+                    obj.insert("tenant".to_string(), json!({
+                        "type": "string",
+                        "enum": tenant_names,
+                        "description": format!(
+                            "Target tenant for this operation. Available: {}. Default: '{}'",
+                            tenant_names.join(", "),
+                            default_name
+                        )
+                    }));
+                }
+            }
+        }
+        tool
     }
 
     /// Returns a reference to the tool config for external access (e.g., hot reload watcher)
@@ -265,8 +304,17 @@ impl ToolRegistry {
             // onelogin_assign_roles and onelogin_remove_roles instead (same functionality)
         ];
 
+        // Inject tenant parameter into all tools when in multi-tenant mode
+        let mut tools: Vec<Value> = all_tools
+            .into_iter()
+            .map(|t| self.with_tenant_param(t))
+            .collect();
+
+        // Add tenant management tools
+        tools.push(self.tool_list_tenants());
+
         // Filter tools based on configuration
-        all_tools
+        tools
             .into_iter()
             .filter(|tool| {
                 let name = tool["name"].as_str().unwrap_or("");
@@ -305,7 +353,7 @@ impl ToolRegistry {
             "onelogin_logout_user" => self.handle_logout_user(&params.arguments).await?,
 
             // Apps
-            "onelogin_list_apps" => self.handle_list_apps().await?,
+            "onelogin_list_apps" => self.handle_list_apps(&params.arguments).await?,
             "onelogin_get_app" => self.handle_get_app(&params.arguments).await?,
             "onelogin_create_app" => self.handle_create_app(&params.arguments).await?,
             "onelogin_update_app" => self.handle_update_app(&params.arguments).await?,
@@ -325,18 +373,18 @@ impl ToolRegistry {
             "onelogin_sort_app_rules" => self.handle_sort_app_rules(&params.arguments).await?,
 
             // Connectors
-            "onelogin_list_connectors" => self.handle_list_connectors().await?,
+            "onelogin_list_connectors" => self.handle_list_connectors(&params.arguments).await?,
             "onelogin_get_connector" => self.handle_get_connector(&params.arguments).await?,
 
             // Roles
-            "onelogin_list_roles" => self.handle_list_roles().await?,
+            "onelogin_list_roles" => self.handle_list_roles(&params.arguments).await?,
             "onelogin_get_role" => self.handle_get_role(&params.arguments).await?,
             "onelogin_create_role" => self.handle_create_role(&params.arguments).await?,
             "onelogin_update_role" => self.handle_update_role(&params.arguments).await?,
             "onelogin_delete_role" => self.handle_delete_role(&params.arguments).await?,
 
             // Groups
-            "onelogin_list_groups" => self.handle_list_groups().await?,
+            "onelogin_list_groups" => self.handle_list_groups(&params.arguments).await?,
             "onelogin_get_group" => self.handle_get_group(&params.arguments).await?,
             "onelogin_create_group" => self.handle_create_group(&params.arguments).await?,
             "onelogin_update_group" => self.handle_update_group(&params.arguments).await?,
@@ -361,7 +409,7 @@ impl ToolRegistry {
             "onelogin_delete_smart_hook" => self.handle_delete_smart_hook(&params.arguments).await?,
             "onelogin_get_smart_hook_logs" => self.handle_get_smart_hook_logs(&params.arguments).await?,
             // Hook Environment Variables (account-level)
-            "onelogin_list_hook_env_vars" => self.handle_list_hook_env_vars().await?,
+            "onelogin_list_hook_env_vars" => self.handle_list_hook_env_vars(&params.arguments).await?,
             "onelogin_get_hook_env_var" => self.handle_get_hook_env_var(&params.arguments).await?,
             "onelogin_create_hook_env_var" => self.handle_create_hook_env_var(&params.arguments).await?,
             "onelogin_update_hook_env_var" => self.handle_update_hook_env_var(&params.arguments).await?,
@@ -379,7 +427,7 @@ impl ToolRegistry {
             "onelogin_verify_saml_factor" => self.handle_verify_saml_factor(&params.arguments).await?,
 
             // Privileges
-            "onelogin_list_privileges" => self.handle_list_privileges().await?,
+            "onelogin_list_privileges" => self.handle_list_privileges(&params.arguments).await?,
             "onelogin_get_privilege" => self.handle_get_privilege(&params.arguments).await?,
             "onelogin_create_privilege" => self.handle_create_privilege(&params.arguments).await?,
             "onelogin_update_privilege" => self.handle_update_privilege(&params.arguments).await?,
@@ -399,7 +447,7 @@ impl ToolRegistry {
             "onelogin_list_events" => self.handle_list_events(&params.arguments).await?,
             "onelogin_get_event" => self.handle_get_event(&params.arguments).await?,
             "onelogin_create_event" => self.handle_create_event(&params.arguments).await?,
-            "onelogin_list_event_types" => self.handle_list_event_types().await?,
+            "onelogin_list_event_types" => self.handle_list_event_types(&params.arguments).await?,
 
             // User Mappings
             "onelogin_get_user_mapping" => self.handle_get_user_mapping(&params.arguments).await?,
@@ -407,19 +455,19 @@ impl ToolRegistry {
             "onelogin_update_user_mapping" => self.handle_update_user_mapping(&params.arguments).await?,
             "onelogin_delete_user_mapping" => self.handle_delete_user_mapping(&params.arguments).await?,
             "onelogin_sort_mapping_order" => self.handle_sort_mapping_order(&params.arguments).await?,
-            "onelogin_list_mapping_conditions" => self.handle_list_mapping_conditions().await?,
+            "onelogin_list_mapping_conditions" => self.handle_list_mapping_conditions(&params.arguments).await?,
 
             // Custom Attributes
-            "onelogin_list_custom_attributes" => self.handle_list_custom_attributes().await?,
+            "onelogin_list_custom_attributes" => self.handle_list_custom_attributes(&params.arguments).await?,
             "onelogin_create_custom_attribute" => self.handle_create_custom_attribute(&params.arguments).await?,
             "onelogin_update_custom_attribute" => self.handle_update_custom_attribute(&params.arguments).await?,
             "onelogin_delete_custom_attribute" => self.handle_delete_custom_attribute(&params.arguments).await?,
 
             // Directories
-            "onelogin_list_directory_connectors" => self.handle_list_directory_connectors().await?,
+            "onelogin_list_directory_connectors" => self.handle_list_directory_connectors(&params.arguments).await?,
 
             // Branding
-            "onelogin_get_branding_settings" => self.handle_get_branding_settings().await?,
+            "onelogin_get_branding_settings" => self.handle_get_branding_settings(&params.arguments).await?,
             "onelogin_list_message_templates" => self.handle_list_message_templates(&params.arguments).await?,
             "onelogin_get_message_template" => self.handle_get_message_template(&params.arguments).await?,
             "onelogin_get_template_by_type" => self.handle_get_template_by_type(&params.arguments).await?,
@@ -430,7 +478,7 @@ impl ToolRegistry {
             "onelogin_delete_message_template" => self.handle_delete_message_template(&params.arguments).await?,
 
             // Self-Registration
-            "onelogin_list_self_registration_profiles" => self.handle_list_self_registration_profiles().await?,
+            "onelogin_list_self_registration_profiles" => self.handle_list_self_registration_profiles(&params.arguments).await?,
             "onelogin_get_self_registration_profile" => self.handle_get_self_registration_profile(&params.arguments).await?,
             "onelogin_create_self_registration_profile" => self.handle_create_self_registration_profile(&params.arguments).await?,
             "onelogin_update_self_registration_profile" => self.handle_update_self_registration_profile(&params.arguments).await?,
@@ -439,7 +487,7 @@ impl ToolRegistry {
             "onelogin_approve_registration" => self.handle_approve_registration(&params.arguments).await?,
 
             // Reports
-            "onelogin_list_reports" => self.handle_list_reports().await?,
+            "onelogin_list_reports" => self.handle_list_reports(&params.arguments).await?,
             "onelogin_get_report" => self.handle_get_report(&params.arguments).await?,
             "onelogin_run_report" => self.handle_run_report(&params.arguments).await?,
             "onelogin_get_report_results" => self.handle_get_report_results(&params.arguments).await?,
@@ -451,9 +499,9 @@ impl ToolRegistry {
 
             // OIDC
             "onelogin_oidc_get_well_known_config" => {
-                self.handle_oidc_get_well_known_config().await?
+                self.handle_oidc_get_well_known_config(&params.arguments).await?
             }
-            "onelogin_oidc_get_jwks" => self.handle_oidc_get_jwks().await?,
+            "onelogin_oidc_get_jwks" => self.handle_oidc_get_jwks(&params.arguments).await?,
 
             // OAuth
             "onelogin_generate_oauth_tokens" => self.handle_generate_oauth_tokens(&params.arguments).await?,
@@ -462,10 +510,10 @@ impl ToolRegistry {
 
             // Embed Tokens
             "onelogin_generate_embed_token" => self.handle_generate_embed_token(&params.arguments).await?,
-            "onelogin_list_embeddable_apps" => self.handle_list_embeddable_apps().await?,
+            "onelogin_list_embeddable_apps" => self.handle_list_embeddable_apps(&params.arguments).await?,
 
             // API Auth
-            "onelogin_list_api_authorizations" => self.handle_list_api_authorizations().await?,
+            "onelogin_list_api_authorizations" => self.handle_list_api_authorizations(&params.arguments).await?,
             "onelogin_get_api_authorization" => self.handle_get_api_authorization(&params.arguments).await?,
             "onelogin_create_api_authorization" => self.handle_create_api_authorization(&params.arguments).await?,
             "onelogin_update_api_authorization" => self.handle_update_api_authorization(&params.arguments).await?,
@@ -478,7 +526,7 @@ impl ToolRegistry {
             "onelogin_oidc_get_userinfo" => self.handle_oidc_get_userinfo(&params.arguments).await?,
 
             // Additional Vigilance
-            "onelogin_list_risk_rules" => self.handle_list_risk_rules().await?,
+            "onelogin_list_risk_rules" => self.handle_list_risk_rules(&params.arguments).await?,
             "onelogin_create_risk_rule" => self.handle_create_risk_rule(&params.arguments).await?,
             "onelogin_update_risk_rule" => self.handle_update_risk_rule(&params.arguments).await?,
             "onelogin_delete_risk_rule" => self.handle_delete_risk_rule(&params.arguments).await?,
@@ -494,7 +542,7 @@ impl ToolRegistry {
             "onelogin_get_sync_status" => self.handle_get_sync_status(&params.arguments).await?,
 
             // User Mappings
-            "onelogin_list_user_mappings" => self.handle_list_user_mappings().await?,
+            "onelogin_list_user_mappings" => self.handle_list_user_mappings(&params.arguments).await?,
             "onelogin_sort_user_mappings" => self.handle_sort_user_mappings(&params.arguments).await?,
             "onelogin_enroll_mfa_factor" => self.handle_enroll_mfa_factor(&params.arguments).await?,
             "onelogin_verify_mfa_factor" => self.handle_verify_mfa_factor(&params.arguments).await?,
@@ -508,23 +556,23 @@ impl ToolRegistry {
             "onelogin_update_branding_settings" => self.handle_update_branding_settings(&params.arguments).await?,
 
             // Rate Limits
-            "onelogin_get_rate_limit_status" => self.handle_get_rate_limit_status().await?,
-            "onelogin_get_rate_limits" => self.handle_get_rate_limits().await?,
+            "onelogin_get_rate_limit_status" => self.handle_get_rate_limit_status(&params.arguments).await?,
+            "onelogin_get_rate_limits" => self.handle_get_rate_limits(&params.arguments).await?,
 
             // Account Settings
-            "onelogin_get_account_settings" => self.handle_get_account_settings().await?,
+            "onelogin_get_account_settings" => self.handle_get_account_settings(&params.arguments).await?,
             "onelogin_update_account_settings" => self.handle_update_account_settings(&params.arguments).await?,
-            "onelogin_get_account_features" => self.handle_get_account_features().await?,
+            "onelogin_get_account_features" => self.handle_get_account_features(&params.arguments).await?,
             "onelogin_get_account_usage" => self.handle_get_account_usage(&params.arguments).await?,
 
             // Password Policies
-            "onelogin_list_password_policies" => self.handle_list_password_policies().await?,
+            "onelogin_list_password_policies" => self.handle_list_password_policies(&params.arguments).await?,
             "onelogin_get_password_policy" => self.handle_get_password_policy(&params.arguments).await?,
             "onelogin_create_password_policy" => self.handle_create_password_policy(&params.arguments).await?,
             "onelogin_update_password_policy" => self.handle_update_password_policy(&params.arguments).await?,
 
             // Certificates
-            "onelogin_list_certificates" => self.handle_list_certificates().await?,
+            "onelogin_list_certificates" => self.handle_list_certificates(&params.arguments).await?,
             "onelogin_get_certificate" => self.handle_get_certificate(&params.arguments).await?,
             "onelogin_generate_certificate" => self.handle_generate_certificate(&params.arguments).await?,
             "onelogin_renew_certificate" => self.handle_renew_certificate(&params.arguments).await?,
@@ -537,14 +585,14 @@ impl ToolRegistry {
             "onelogin_delete_device" => self.handle_delete_device(&params.arguments).await?,
 
             // Login Pages
-            "onelogin_list_login_pages" => self.handle_list_login_pages().await?,
+            "onelogin_list_login_pages" => self.handle_list_login_pages(&params.arguments).await?,
             "onelogin_get_login_page" => self.handle_get_login_page(&params.arguments).await?,
             "onelogin_create_login_page" => self.handle_create_login_page(&params.arguments).await?,
             "onelogin_update_login_page" => self.handle_update_login_page(&params.arguments).await?,
             "onelogin_delete_login_page" => self.handle_delete_login_page(&params.arguments).await?,
 
             // Trusted IDPs
-            "onelogin_list_trusted_idps" => self.handle_list_trusted_idps().await?,
+            "onelogin_list_trusted_idps" => self.handle_list_trusted_idps(&params.arguments).await?,
             "onelogin_get_trusted_idp" => self.handle_get_trusted_idp(&params.arguments).await?,
             "onelogin_create_trusted_idp" => self.handle_create_trusted_idp(&params.arguments).await?,
             "onelogin_update_trusted_idp" => self.handle_update_trusted_idp(&params.arguments).await?,
@@ -560,6 +608,9 @@ impl ToolRegistry {
             "onelogin_get_role_admins" => self.handle_get_role_admins(&params.arguments).await?,
             "onelogin_add_role_admins" => self.handle_add_role_admins(&params.arguments).await?,
             "onelogin_remove_role_admin" => self.handle_remove_role_admin(&params.arguments).await?,
+
+            // Tenant Management
+            "onelogin_list_tenants" => self.handle_list_tenants().await?,
 
             _ => return Err(anyhow!("Unknown tool: {}", params.name)),
         };
@@ -3022,6 +3073,7 @@ impl ToolRegistry {
 
     // Tool handlers (implementations)
     async fn handle_list_users(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         debug!("Parsing list_users arguments: {}", serde_json::to_string_pretty(args).unwrap_or_default());
 
         let parsed_args: ListUsersArgs = serde_json::from_value(args.clone())
@@ -3074,8 +3126,7 @@ impl ToolRegistry {
 
                     debug!("Fetching page {} with limit {}", current_page, limit);
 
-                    let batch = self
-                        .client
+                    let batch = client
                         .users
                         .list_users(Some(paged_params.clone()))
                         .await
@@ -3156,8 +3207,7 @@ impl ToolRegistry {
         };
 
         debug!("Calling OneLogin API to list users...");
-        let users = self
-            .client
+        let users = client
             .users
             .list_users(params.clone())
             .await
@@ -3189,11 +3239,12 @@ impl ToolRegistry {
     }
 
     async fn handle_get_user(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let user_id: i64 = args
             .get("user_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("user_id is required"))?;
-        let result = self.client.users.get_user(user_id).await;
+        let result = client.users.get_user(user_id).await;
 
         match result {
             Ok(user) => Ok(serde_json::to_value(user)?),
@@ -3206,12 +3257,12 @@ impl ToolRegistry {
     }
 
     async fn handle_get_user_apps(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let user_id: i64 = args
             .get("user_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("user_id is required"))?;
-        let apps = self
-            .client
+        let apps = client
             .users
             .get_user_apps(user_id)
             .await
@@ -3220,12 +3271,12 @@ impl ToolRegistry {
     }
 
     async fn handle_get_user_roles(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let user_id: i64 = args
             .get("user_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("user_id is required"))?;
-        let roles = self
-            .client
+        let roles = client
             .users
             .get_user_roles(user_id)
             .await
@@ -3234,11 +3285,12 @@ impl ToolRegistry {
     }
 
     async fn handle_unlock_user(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let user_id: i64 = args
             .get("user_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("user_id is required"))?;
-        self.client
+        client
             .users
             .unlock_user(user_id)
             .await
@@ -3250,11 +3302,12 @@ impl ToolRegistry {
     }
 
     async fn handle_logout_user(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let user_id: i64 = args
             .get("user_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("user_id is required"))?;
-        self.client
+        client
             .users
             .logout_user(user_id)
             .await
@@ -3265,9 +3318,9 @@ impl ToolRegistry {
         }))
     }
 
-    async fn handle_list_apps(&self) -> Result<Value> {
-        let apps = self
-            .client
+    async fn handle_list_apps(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
+        let apps = client
             .apps
             .list_apps()
             .await
@@ -3276,9 +3329,10 @@ impl ToolRegistry {
     }
 
     async fn handle_create_role(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let request: CreateRoleRequest =
             serde_json::from_value(args.clone()).map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let result = self.client.roles.create_role(request).await;
+        let result = client.roles.create_role(request).await;
 
         match result {
             Ok(role) => Ok(serde_json::to_value(role)?),
@@ -3287,11 +3341,12 @@ impl ToolRegistry {
     }
 
     async fn handle_delete_role(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let role_id: i64 = args
             .get("role_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("role_id is required"))?;
-        let result = self.client.roles.delete_role(role_id).await;
+        let result = client.roles.delete_role(role_id).await;
 
         match result {
             Ok(_) => Ok(json!({"status": "deleted", "role_id": role_id})),
@@ -3304,11 +3359,12 @@ impl ToolRegistry {
     }
 
     async fn handle_get_role(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let role_id: i64 = args
             .get("role_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("role_id is required"))?;
-        let result = self.client.roles.get_role(role_id).await;
+        let result = client.roles.get_role(role_id).await;
 
         match result {
             Ok(role) => Ok(serde_json::to_value(role)?),
@@ -3321,6 +3377,7 @@ impl ToolRegistry {
     }
 
     async fn handle_update_role(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let role_id: i64 = args
             .get("role_id")
             .and_then(|v| value_as_i64(v))
@@ -3333,7 +3390,7 @@ impl ToolRegistry {
                 .get("description")
                 .and_then(|v| v.as_str().map(|s| s.to_string())),
         };
-        let result = self.client.roles.update_role(role_id, request).await;
+        let result = client.roles.update_role(role_id, request).await;
 
         match result {
             Ok(role) => Ok(serde_json::to_value(role)?),
@@ -3345,9 +3402,9 @@ impl ToolRegistry {
         }
     }
 
-    async fn handle_list_roles(&self) -> Result<Value> {
-        let roles = self
-            .client
+    async fn handle_list_roles(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
+        let roles = client
             .roles
             .list_roles()
             .await
@@ -3355,9 +3412,9 @@ impl ToolRegistry {
         Ok(serde_json::to_value(roles)?)
     }
 
-    async fn handle_list_groups(&self) -> Result<Value> {
-        let groups = self
-            .client
+    async fn handle_list_groups(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
+        let groups = client
             .groups
             .list_groups()
             .await
@@ -3366,10 +3423,10 @@ impl ToolRegistry {
     }
 
     async fn handle_create_user(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let request =
             serde_json::from_value(args.clone()).map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let user = self
-            .client
+        let user = client
             .users
             .create_user(request)
             .await
@@ -3378,13 +3435,14 @@ impl ToolRegistry {
     }
 
     async fn handle_update_user(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let user_id: i64 = args
             .get("user_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("user_id is required"))?;
         let request =
             serde_json::from_value(args.clone()).map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let result = self.client.users.update_user(user_id, request).await;
+        let result = client.users.update_user(user_id, request).await;
 
         match result {
             Ok(user) => Ok(serde_json::to_value(user)?),
@@ -3397,11 +3455,12 @@ impl ToolRegistry {
     }
 
     async fn handle_delete_user(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let user_id: i64 = args
             .get("user_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("user_id is required"))?;
-        let result = self.client.users.delete_user(user_id).await;
+        let result = client.users.delete_user(user_id).await;
 
         match result {
             Ok(_) => Ok(json!({"status": "deleted", "user_id": user_id})),
@@ -3413,9 +3472,9 @@ impl ToolRegistry {
         }
     }
 
-    async fn handle_list_privileges(&self) -> Result<Value> {
-        let privileges = self
-            .client
+    async fn handle_list_privileges(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
+        let privileges = client
             .privileges
             .list_privileges()
             .await
@@ -3434,6 +3493,7 @@ impl ToolRegistry {
 
 
     async fn handle_list_events(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let params: Option<EventQueryParams> =
             if args.as_object().map(|o| !o.is_empty()).unwrap_or(false) {
                 Some(
@@ -3444,8 +3504,7 @@ impl ToolRegistry {
                 None
             };
 
-        let events = self
-            .client
+        let events = client
             .events
             .list_events(params)
             .await
@@ -3453,9 +3512,9 @@ impl ToolRegistry {
         Ok(serde_json::to_value(events)?)
     }
 
-    async fn handle_list_custom_attributes(&self) -> Result<Value> {
-        let attributes = self
-            .client
+    async fn handle_list_custom_attributes(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
+        let attributes = client
             .custom_attributes
             .list_custom_attributes()
             .await
@@ -3463,9 +3522,9 @@ impl ToolRegistry {
         Ok(serde_json::to_value(attributes)?)
     }
 
-    async fn handle_list_directory_connectors(&self) -> Result<Value> {
-        let connectors = self
-            .client
+    async fn handle_list_directory_connectors(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
+        let connectors = client
             .connectors
             .list_connectors()
             .await
@@ -3473,9 +3532,9 @@ impl ToolRegistry {
         Ok(serde_json::to_value(connectors)?)
     }
 
-    async fn handle_get_branding_settings(&self) -> Result<Value> {
-        let branding = self
-            .client
+    async fn handle_get_branding_settings(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
+        let branding = client
             .branding
             .get_branding_settings()
             .await
@@ -3483,9 +3542,9 @@ impl ToolRegistry {
         Ok(serde_json::to_value(branding)?)
     }
 
-    async fn handle_oidc_get_well_known_config(&self) -> Result<Value> {
-        let config = self
-            .client
+    async fn handle_oidc_get_well_known_config(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
+        let config = client
             .oidc
             .get_well_known_configuration()
             .await
@@ -3493,9 +3552,9 @@ impl ToolRegistry {
         Ok(serde_json::to_value(config)?)
     }
 
-    async fn handle_oidc_get_jwks(&self) -> Result<Value> {
-        let jwks = self
-            .client
+    async fn handle_oidc_get_jwks(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
+        let jwks = client
             .oidc
             .get_jwks()
             .await
@@ -3504,6 +3563,7 @@ impl ToolRegistry {
     }
 
     async fn handle_create_smart_hook(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let mut request: crate::models::smart_hooks::CreateHookRequest =
             serde_json::from_value(args.clone()).map_err(|e| anyhow!("Invalid request: {}", e))?;
 
@@ -3551,8 +3611,7 @@ impl ToolRegistry {
             request.env_vars = Some(Vec::new());
         }
 
-        let hook = self
-            .client
+        let hook = client
             .smart_hooks
             .create_hook(request)
             .await
@@ -3561,14 +3620,14 @@ impl ToolRegistry {
     }
 
     async fn handle_update_smart_hook(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let hook_id = args
             .get("hook_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("hook_id is required"))?;
 
         // OneLogin API requires ALL fields for update, so fetch current hook first
-        let current_hook = self
-            .client
+        let current_hook = client
             .smart_hooks
             .get_hook(hook_id)
             .await
@@ -3629,8 +3688,7 @@ impl ToolRegistry {
                 .or(current_hook.options.clone()),
         };
 
-        let hook = self
-            .client
+        let hook = client
             .smart_hooks
             .update_hook_full(hook_id, request)
             .await
@@ -3638,9 +3696,9 @@ impl ToolRegistry {
         Ok(serde_json::to_value(hook)?)
     }
 
-    async fn handle_list_smart_hooks(&self, _args: &Value) -> Result<Value> {
-        let hooks = self
-            .client
+    async fn handle_list_smart_hooks(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
+        let hooks = client
             .smart_hooks
             .list_hooks()
             .await
@@ -3649,6 +3707,7 @@ impl ToolRegistry {
     }
 
     async fn handle_get_risk_score(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let user_id = args
             .get("user_id")
             .and_then(|v| v.as_str())
@@ -3661,8 +3720,7 @@ impl ToolRegistry {
             .get("user_agent")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("user_agent is required"))?;
-        let score = self
-            .client
+        let score = client
             .vigilance
             .get_risk_score(user_id, ip, user_agent)
             .await
@@ -3671,10 +3729,10 @@ impl ToolRegistry {
     }
 
     async fn handle_validate_user_smart_mfa(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let request =
             serde_json::from_value(args.clone()).map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let result = self
-            .client
+        let result = client
             .vigilance
             .validate_user(request)
             .await
@@ -3685,12 +3743,12 @@ impl ToolRegistry {
     // ==================== GROUP HANDLERS ====================
 
     async fn handle_get_group(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let group_id: i64 = args
             .get("group_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("group_id is required"))?;
-        let group = self
-            .client
+        let group = client
             .groups
             .get_group(group_id)
             .await
@@ -3699,10 +3757,10 @@ impl ToolRegistry {
     }
 
     async fn handle_create_group(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let request = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let group = self
-            .client
+        let group = client
             .groups
             .create_group(request)
             .await
@@ -3711,14 +3769,14 @@ impl ToolRegistry {
     }
 
     async fn handle_update_group(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let group_id: i64 = args
             .get("group_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("group_id is required"))?;
         let request = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let group = self
-            .client
+        let group = client
             .groups
             .update_group(group_id, request)
             .await
@@ -3727,11 +3785,12 @@ impl ToolRegistry {
     }
 
     async fn handle_delete_group(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let group_id: i64 = args
             .get("group_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("group_id is required"))?;
-        self.client
+        client
             .groups
             .delete_group(group_id)
             .await
@@ -3742,12 +3801,12 @@ impl ToolRegistry {
     // ==================== APP HANDLERS ====================
 
     async fn handle_get_app(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let app_id: i64 = args
             .get("app_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("app_id is required"))?;
-        let app = self
-            .client
+        let app = client
             .apps
             .get_app(app_id)
             .await
@@ -3756,10 +3815,10 @@ impl ToolRegistry {
     }
 
     async fn handle_create_app(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let request = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let app = self
-            .client
+        let app = client
             .apps
             .create_app(request)
             .await
@@ -3768,14 +3827,14 @@ impl ToolRegistry {
     }
 
     async fn handle_update_app(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let app_id: i64 = args
             .get("app_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("app_id is required"))?;
         let request = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let app = self
-            .client
+        let app = client
             .apps
             .update_app(app_id, request)
             .await
@@ -3784,11 +3843,12 @@ impl ToolRegistry {
     }
 
     async fn handle_delete_app(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let app_id: i64 = args
             .get("app_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("app_id is required"))?;
-        self.client
+        client
             .apps
             .delete_app(app_id)
             .await
@@ -3799,6 +3859,7 @@ impl ToolRegistry {
     // ==================== USER OPERATIONS ====================
 
     async fn handle_assign_roles(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let user_id = args
             .get("user_id")
             .and_then(|v| value_as_i64(v))
@@ -3811,7 +3872,7 @@ impl ToolRegistry {
         let request = crate::models::users::AssignRolesRequest {
             role_id_array: role_ids,
         };
-        self.client
+        client
             .users
             .assign_roles(user_id, request)
             .await
@@ -3820,6 +3881,7 @@ impl ToolRegistry {
     }
 
     async fn handle_remove_roles(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let user_id = args
             .get("user_id")
             .and_then(|v| value_as_i64(v))
@@ -3832,7 +3894,7 @@ impl ToolRegistry {
         let request = crate::models::users::RemoveRolesRequest {
             role_id_array: role_ids,
         };
-        self.client
+        client
             .users
             .remove_roles(user_id, request)
             .await
@@ -3841,13 +3903,14 @@ impl ToolRegistry {
     }
 
     async fn handle_lock_user(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let user_id = args
             .get("user_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("user_id is required"))?;
         let request = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        self.client
+        client
             .users
             .lock_user(user_id, request)
             .await
@@ -3856,13 +3919,14 @@ impl ToolRegistry {
     }
 
     async fn handle_set_password(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let user_id = args
             .get("user_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("user_id is required"))?;
         let request = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        self.client
+        client
             .users
             .set_password_clear_text(user_id, request)
             .await
@@ -3871,13 +3935,14 @@ impl ToolRegistry {
     }
 
     async fn handle_set_custom_attributes(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let user_id = args
             .get("user_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("user_id is required"))?;
         let request = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        self.client
+        client
             .users
             .set_custom_attributes(user_id, request)
             .await
@@ -3904,12 +3969,12 @@ impl ToolRegistry {
     }
 
     async fn handle_get_privilege(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let privilege_id = args
             .get("privilege_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("privilege_id is required"))?;
-        let privilege = self
-            .client
+        let privilege = client
             .privileges
             .get_privilege(privilege_id)
             .await
@@ -3918,6 +3983,7 @@ impl ToolRegistry {
     }
 
     async fn handle_create_privilege(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         use crate::models::privileges::{CreatePrivilegeRequest, PrivilegeStatement, StatementItem};
 
         let name = args
@@ -3979,8 +4045,7 @@ impl ToolRegistry {
             },
         };
 
-        let privilege = self
-            .client
+        let privilege = client
             .privileges
             .create_privilege(request)
             .await
@@ -3989,6 +4054,7 @@ impl ToolRegistry {
     }
 
     async fn handle_update_privilege(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         use crate::models::privileges::UpdatePrivilegeRequest;
 
         let privilege_id = args
@@ -3997,8 +4063,7 @@ impl ToolRegistry {
             .ok_or_else(|| anyhow!("privilege_id is required"))?;
 
         // Get the current privilege to preserve the privilege statement (required by API)
-        let current = self
-            .client
+        let current = client
             .privileges
             .get_privilege(privilege_id)
             .await
@@ -4021,8 +4086,7 @@ impl ToolRegistry {
             privilege: Some(current.privilege),
         };
 
-        let privilege = self
-            .client
+        let privilege = client
             .privileges
             .update_privilege(privilege_id, request)
             .await
@@ -4031,11 +4095,12 @@ impl ToolRegistry {
     }
 
     async fn handle_delete_privilege(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let privilege_id = args
             .get("privilege_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("privilege_id is required"))?;
-        self.client
+        client
             .privileges
             .delete_privilege(privilege_id)
             .await
@@ -4044,6 +4109,7 @@ impl ToolRegistry {
     }
 
     async fn handle_assign_user_to_privilege(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let privilege_id = args
             .get("privilege_id")
             .and_then(|v| v.as_str())
@@ -4052,7 +4118,7 @@ impl ToolRegistry {
             .get("user_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("user_id is required"))?;
-        self.client
+        client
             .privileges
             .assign_to_user(privilege_id, user_id)
             .await
@@ -4061,6 +4127,7 @@ impl ToolRegistry {
     }
 
     async fn handle_assign_role_to_privilege(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let privilege_id = args
             .get("privilege_id")
             .and_then(|v| v.as_str())
@@ -4069,7 +4136,7 @@ impl ToolRegistry {
             .get("role_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("role_id is required"))?;
-        self.client
+        client
             .privileges
             .assign_to_role(privilege_id, role_id)
             .await
@@ -4080,12 +4147,12 @@ impl ToolRegistry {
     // ==================== MFA OPERATIONS ====================
 
     async fn handle_list_mfa_factors(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let user_id = args
             .get("user_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("user_id is required"))?;
-        let factors = self
-            .client
+        let factors = client
             .mfa
             .list_factors(user_id)
             .await
@@ -4094,6 +4161,7 @@ impl ToolRegistry {
     }
 
     async fn handle_enroll_mfa(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let user_id = args
             .get("user_id")
             .and_then(|v| value_as_i64(v))
@@ -4104,8 +4172,7 @@ impl ToolRegistry {
             .ok_or_else(|| anyhow!("factor_id is required"))?;
         let request = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let enrollment = self
-            .client
+        let enrollment = client
             .mfa
             .enroll_factor(user_id, factor_id, request)
             .await
@@ -4114,6 +4181,7 @@ impl ToolRegistry {
     }
 
     async fn handle_verify_mfa(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let user_id = args
             .get("user_id")
             .and_then(|v| value_as_i64(v))
@@ -4124,8 +4192,7 @@ impl ToolRegistry {
             .ok_or_else(|| anyhow!("device_id is required"))?;
         let request = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let result = self
-            .client
+        let result = client
             .mfa
             .verify_factor(user_id, device_id, request)
             .await
@@ -4134,6 +4201,7 @@ impl ToolRegistry {
     }
 
     async fn handle_remove_mfa(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let user_id = args
             .get("user_id")
             .and_then(|v| value_as_i64(v))
@@ -4142,7 +4210,7 @@ impl ToolRegistry {
             .get("device_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("device_id is required"))?;
-        self.client
+        client
             .mfa
             .remove_factor(user_id, device_id)
             .await
@@ -4153,12 +4221,12 @@ impl ToolRegistry {
     // ==================== SMART HOOKS OPERATIONS ====================
 
     async fn handle_get_smart_hook(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let hook_id = args
             .get("hook_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("hook_id is required"))?;
-        let hook = self
-            .client
+        let hook = client
             .smart_hooks
             .get_hook(hook_id)
             .await
@@ -4167,11 +4235,12 @@ impl ToolRegistry {
     }
 
     async fn handle_delete_smart_hook(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let hook_id = args
             .get("hook_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("hook_id is required"))?;
-        self.client
+        client
             .smart_hooks
             .delete_hook(hook_id)
             .await
@@ -4181,9 +4250,9 @@ impl ToolRegistry {
 
     // ==================== HOOK ENVIRONMENT VARIABLES (Account-Level) ====================
 
-    async fn handle_list_hook_env_vars(&self) -> Result<Value> {
-        let env_vars = self
-            .client
+    async fn handle_list_hook_env_vars(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
+        let env_vars = client
             .smart_hooks
             .list_env_vars()
             .await
@@ -4192,12 +4261,12 @@ impl ToolRegistry {
     }
 
     async fn handle_get_hook_env_var(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let env_var_id = args
             .get("env_var_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("env_var_id is required"))?;
-        let env_var = self
-            .client
+        let env_var = client
             .smart_hooks
             .get_env_var(env_var_id)
             .await
@@ -4206,6 +4275,7 @@ impl ToolRegistry {
     }
 
     async fn handle_create_hook_env_var(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let name = args
             .get("name")
             .and_then(|v| v.as_str())
@@ -4218,8 +4288,7 @@ impl ToolRegistry {
             name: name.to_string(),
             value: value.to_string(),
         };
-        let env_var = self
-            .client
+        let env_var = client
             .smart_hooks
             .create_env_var(request)
             .await
@@ -4228,6 +4297,7 @@ impl ToolRegistry {
     }
 
     async fn handle_update_hook_env_var(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let env_var_id = args
             .get("env_var_id")
             .and_then(|v| v.as_str())
@@ -4239,8 +4309,7 @@ impl ToolRegistry {
         let request = crate::models::smart_hooks::UpdateEnvVarRequest {
             value: value.to_string(),
         };
-        let env_var = self
-            .client
+        let env_var = client
             .smart_hooks
             .update_env_var(env_var_id, request)
             .await
@@ -4249,11 +4318,12 @@ impl ToolRegistry {
     }
 
     async fn handle_delete_hook_env_var(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let env_var_id = args
             .get("env_var_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("env_var_id is required"))?;
-        self.client
+        client
             .smart_hooks
             .delete_env_var(env_var_id)
             .await
@@ -4262,12 +4332,12 @@ impl ToolRegistry {
     }
 
     async fn handle_get_smart_hook_logs(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let hook_id = args
             .get("hook_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("hook_id is required"))?;
-        let logs = self
-            .client
+        let logs = client
             .smart_hooks
             .get_hook_logs(hook_id)
             .await
@@ -4278,10 +4348,10 @@ impl ToolRegistry {
     // ==================== SAML OPERATIONS ====================
 
     async fn handle_get_saml_assertion(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let request = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let response = self
-            .client
+        let response = client
             .saml
             .get_saml_assertion(request)
             .await
@@ -4290,10 +4360,10 @@ impl ToolRegistry {
     }
 
     async fn handle_verify_saml_factor(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let request = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let response = self
-            .client
+        let response = client
             .saml
             .verify_saml_factor(request)
             .await
@@ -4304,12 +4374,12 @@ impl ToolRegistry {
     // ==================== EVENTS OPERATIONS ====================
 
     async fn handle_get_event(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let event_id = args
             .get("event_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("event_id is required"))?;
-        let event = self
-            .client
+        let event = client
             .events
             .get_event(event_id)
             .await
@@ -4318,9 +4388,10 @@ impl ToolRegistry {
     }
 
     async fn handle_create_event(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let request = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        self.client
+        client
             .events
             .create_event(request)
             .await
@@ -4331,9 +4402,9 @@ impl ToolRegistry {
         }))
     }
 
-    async fn handle_list_event_types(&self) -> Result<Value> {
-        let event_types = self
-            .client
+    async fn handle_list_event_types(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
+        let event_types = client
             .events
             .list_event_types()
             .await
@@ -4344,12 +4415,12 @@ impl ToolRegistry {
     // ==================== USER MAPPINGS OPERATIONS ====================
 
     async fn handle_get_user_mapping(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let mapping_id = args
             .get("mapping_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("mapping_id is required"))?;
-        let mapping = self
-            .client
+        let mapping = client
             .user_mappings
             .get_mapping(mapping_id)
             .await
@@ -4358,10 +4429,10 @@ impl ToolRegistry {
     }
 
     async fn handle_create_user_mapping(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let request = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let mapping = self
-            .client
+        let mapping = client
             .user_mappings
             .create_mapping(request)
             .await
@@ -4370,14 +4441,14 @@ impl ToolRegistry {
     }
 
     async fn handle_update_user_mapping(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let mapping_id = args
             .get("mapping_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("mapping_id is required"))?;
         let request = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let mapping = self
-            .client
+        let mapping = client
             .user_mappings
             .update_mapping(mapping_id, request)
             .await
@@ -4386,11 +4457,12 @@ impl ToolRegistry {
     }
 
     async fn handle_delete_user_mapping(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let mapping_id = args
             .get("mapping_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("mapping_id is required"))?;
-        self.client
+        client
             .user_mappings
             .delete_mapping(mapping_id)
             .await
@@ -4399,9 +4471,10 @@ impl ToolRegistry {
     }
 
     async fn handle_sort_mapping_order(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let request = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        self.client
+        client
             .user_mappings
             .sort_mapping_order(request)
             .await
@@ -4409,9 +4482,9 @@ impl ToolRegistry {
         Ok(json!({"success": true, "message": "Mapping order updated successfully"}))
     }
 
-    async fn handle_list_mapping_conditions(&self) -> Result<Value> {
-        let conditions = self
-            .client
+    async fn handle_list_mapping_conditions(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
+        let conditions = client
             .user_mappings
             .list_conditions()
             .await
@@ -4422,10 +4495,10 @@ impl ToolRegistry {
     // ==================== CUSTOM ATTRIBUTES OPERATIONS ====================
 
     async fn handle_create_custom_attribute(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let request = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let attribute = self
-            .client
+        let attribute = client
             .custom_attributes
             .create_custom_attribute(request)
             .await
@@ -4434,14 +4507,14 @@ impl ToolRegistry {
     }
 
     async fn handle_update_custom_attribute(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let attribute_id = args
             .get("attribute_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("attribute_id is required"))?;
         let request = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let attribute = self
-            .client
+        let attribute = client
             .custom_attributes
             .update_custom_attribute(attribute_id, request)
             .await
@@ -4450,11 +4523,12 @@ impl ToolRegistry {
     }
 
     async fn handle_delete_custom_attribute(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let attribute_id = args
             .get("attribute_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("attribute_id is required"))?;
-        self.client
+        client
             .custom_attributes
             .delete_custom_attribute(attribute_id)
             .await
@@ -4465,10 +4539,10 @@ impl ToolRegistry {
     // ==================== OAUTH OPERATIONS ====================
 
     async fn handle_generate_oauth_tokens(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let request = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let tokens = self
-            .client
+        let tokens = client
             .oauth
             .generate_tokens(request)
             .await
@@ -4477,9 +4551,10 @@ impl ToolRegistry {
     }
 
     async fn handle_revoke_oauth_token(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let request = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        self.client
+        client
             .oauth
             .revoke_token(request)
             .await
@@ -4488,10 +4563,10 @@ impl ToolRegistry {
     }
 
     async fn handle_introspect_oauth_token(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let request = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let introspection = self
-            .client
+        let introspection = client
             .oauth
             .introspect_token(request)
             .await
@@ -4502,10 +4577,10 @@ impl ToolRegistry {
     // ==================== EMBED TOKENS OPERATIONS ====================
 
     async fn handle_generate_embed_token(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let request = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let token = self
-            .client
+        let token = client
             .embed_tokens
             .generate_embed_token(request)
             .await
@@ -4513,9 +4588,9 @@ impl ToolRegistry {
         Ok(serde_json::to_value(token)?)
     }
 
-    async fn handle_list_embeddable_apps(&self) -> Result<Value> {
-        let apps = self
-            .client
+    async fn handle_list_embeddable_apps(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
+        let apps = client
             .embed_tokens
             .list_embeddable_apps()
             .await
@@ -4525,9 +4600,9 @@ impl ToolRegistry {
 
     // ==================== API AUTH OPERATIONS ====================
 
-    async fn handle_list_api_authorizations(&self) -> Result<Value> {
-        let authorizations = self
-            .client
+    async fn handle_list_api_authorizations(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
+        let authorizations = client
             .api_auth
             .list_api_authorizations()
             .await
@@ -4536,12 +4611,12 @@ impl ToolRegistry {
     }
 
     async fn handle_get_api_authorization(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let auth_id = args
             .get("auth_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("auth_id is required"))?;
-        let authorization = self
-            .client
+        let authorization = client
             .api_auth
             .get_api_authorization(auth_id)
             .await
@@ -4550,10 +4625,10 @@ impl ToolRegistry {
     }
 
     async fn handle_create_api_authorization(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let request = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let authorization = self
-            .client
+        let authorization = client
             .api_auth
             .create_api_authorization(request)
             .await
@@ -4562,14 +4637,14 @@ impl ToolRegistry {
     }
 
     async fn handle_update_api_authorization(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let auth_id = args
             .get("auth_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("auth_id is required"))?;
         let request = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let authorization = self
-            .client
+        let authorization = client
             .api_auth
             .update_api_authorization(auth_id, request)
             .await
@@ -4578,11 +4653,12 @@ impl ToolRegistry {
     }
 
     async fn handle_delete_api_authorization(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let auth_id = args
             .get("auth_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("auth_id is required"))?;
-        self.client
+        client
             .api_auth
             .delete_api_authorization(auth_id)
             .await
@@ -4593,10 +4669,10 @@ impl ToolRegistry {
     // ==================== ADDITIONAL SAML OPERATIONS ====================
 
     async fn handle_get_saml_assertion_v2(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let request = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let response = self
-            .client
+        let response = client
             .saml
             .get_saml_assertion_v2(request)
             .await
@@ -4607,12 +4683,12 @@ impl ToolRegistry {
     // ==================== ADDITIONAL OIDC OPERATIONS ====================
 
     async fn handle_oidc_get_userinfo(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let access_token = args
             .get("access_token")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("access_token is required"))?;
-        let userinfo = self
-            .client
+        let userinfo = client
             .oidc
             .get_userinfo(access_token)
             .await
@@ -4622,9 +4698,9 @@ impl ToolRegistry {
 
     // ==================== ADDITIONAL VIGILANCE OPERATIONS ====================
 
-    async fn handle_list_risk_rules(&self) -> Result<Value> {
-        let rules = self
-            .client
+    async fn handle_list_risk_rules(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
+        let rules = client
             .vigilance
             .list_risk_rules()
             .await
@@ -4633,10 +4709,10 @@ impl ToolRegistry {
     }
 
     async fn handle_create_risk_rule(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let request = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let rule = self
-            .client
+        let rule = client
             .vigilance
             .create_risk_rule(request)
             .await
@@ -4645,14 +4721,14 @@ impl ToolRegistry {
     }
 
     async fn handle_update_risk_rule(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let rule_id = args
             .get("rule_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("rule_id is required"))?;
         let request = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let rule = self
-            .client
+        let rule = client
             .vigilance
             .update_risk_rule(rule_id, request)
             .await
@@ -4661,11 +4737,12 @@ impl ToolRegistry {
     }
 
     async fn handle_delete_risk_rule(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let rule_id = args
             .get("rule_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("rule_id is required"))?;
-        self.client
+        client
             .vigilance
             .delete_risk_rule(rule_id)
             .await
@@ -4674,12 +4751,12 @@ impl ToolRegistry {
     }
 
     async fn handle_get_risk_events(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let user_id = args
             .get("user_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("user_id is required"))?;
-        let events = self
-            .client
+        let events = client
             .vigilance
             .get_risk_events(user_id)
             .await
@@ -4688,9 +4765,10 @@ impl ToolRegistry {
     }
 
     async fn handle_track_risk_event(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let event = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        self.client
+        client
             .vigilance
             .track_risk_event(event)
             .await
@@ -4700,38 +4778,44 @@ impl ToolRegistry {
 
     // ==================== DIRECTORIES OPERATIONS ====================
 
-    async fn handle_get_directory_connector(&self, _args: &Value) -> Result<Value> {
+    async fn handle_get_directory_connector(&self, args: &Value) -> Result<Value> {
+        let _client = self.resolve_client(args)?;
         // OneLogin API v2 only supports listing connectors, not getting individual ones
         // Users should use list_connectors and filter client-side
         Err(anyhow!("OneLogin API does not provide an endpoint to get individual connectors. Use list_connectors instead."))
     }
 
-    async fn handle_update_directory_connector(&self, _args: &Value) -> Result<Value> {
+    async fn handle_update_directory_connector(&self, args: &Value) -> Result<Value> {
+        let _client = self.resolve_client(args)?;
         // OneLogin API v2 does not provide connector management endpoints
         Err(anyhow!("OneLogin API does not provide endpoints to update connectors. Connector management must be done through the OneLogin admin console."))
     }
 
-    async fn handle_create_directory_connector(&self, _args: &Value) -> Result<Value> {
+    async fn handle_create_directory_connector(&self, args: &Value) -> Result<Value> {
+        let _client = self.resolve_client(args)?;
         Err(anyhow!("OneLogin API does not provide endpoints to create connectors. Connector management must be done through the OneLogin admin console."))
     }
 
-    async fn handle_delete_directory_connector(&self, _args: &Value) -> Result<Value> {
+    async fn handle_delete_directory_connector(&self, args: &Value) -> Result<Value> {
+        let _client = self.resolve_client(args)?;
         Err(anyhow!("OneLogin API does not provide endpoints to delete connectors. Connector management must be done through the OneLogin admin console."))
     }
 
-    async fn handle_sync_directory(&self, _args: &Value) -> Result<Value> {
+    async fn handle_sync_directory(&self, args: &Value) -> Result<Value> {
+        let _client = self.resolve_client(args)?;
         Err(anyhow!("OneLogin API does not provide endpoints to trigger directory sync. Directory sync must be done through the OneLogin admin console."))
     }
 
-    async fn handle_get_sync_status(&self, _args: &Value) -> Result<Value> {
+    async fn handle_get_sync_status(&self, args: &Value) -> Result<Value> {
+        let _client = self.resolve_client(args)?;
         Err(anyhow!("OneLogin API does not provide endpoints to get sync status. Directory status must be checked through the OneLogin admin console."))
     }
 
     // ==================== USER MAPPINGS OPERATIONS ====================
 
-    async fn handle_list_user_mappings(&self) -> Result<Value> {
-        let mappings = self
-            .client
+    async fn handle_list_user_mappings(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
+        let mappings = client
             .user_mappings
             .list_mappings()
             .await
@@ -4740,9 +4824,10 @@ impl ToolRegistry {
     }
 
     async fn handle_sort_user_mappings(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let request = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        self.client
+        client
             .user_mappings
             .sort_mapping_order(request)
             .await
@@ -4753,6 +4838,7 @@ impl ToolRegistry {
     // ==================== MFA FACTOR OPERATIONS ====================
 
     async fn handle_enroll_mfa_factor(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let user_id = args
             .get("user_id")
             .and_then(|v| value_as_i64(v))
@@ -4763,8 +4849,7 @@ impl ToolRegistry {
             .ok_or_else(|| anyhow!("factor_id is required"))?;
         let request = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let enrollment = self
-            .client
+        let enrollment = client
             .mfa
             .enroll_factor(user_id, factor_id, request)
             .await
@@ -4773,6 +4858,7 @@ impl ToolRegistry {
     }
 
     async fn handle_verify_mfa_factor(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let user_id = args
             .get("user_id")
             .and_then(|v| value_as_i64(v))
@@ -4783,8 +4869,7 @@ impl ToolRegistry {
             .ok_or_else(|| anyhow!("device_id is required"))?;
         let request = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let result = self
-            .client
+        let result = client
             .mfa
             .verify_factor(user_id, device_id, request)
             .await
@@ -4793,6 +4878,7 @@ impl ToolRegistry {
     }
 
     async fn handle_remove_mfa_factor(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let user_id = args
             .get("user_id")
             .and_then(|v| value_as_i64(v))
@@ -4801,7 +4887,7 @@ impl ToolRegistry {
             .get("device_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("device_id is required"))?;
-        self.client
+        client
             .mfa
             .remove_factor(user_id, device_id)
             .await
@@ -4812,10 +4898,10 @@ impl ToolRegistry {
     // ==================== INVITATIONS OPERATIONS ====================
 
     async fn handle_generate_invite_link(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let request = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let invitation = self
-            .client
+        let invitation = client
             .invitations
             .generate_invite_link(request)
             .await
@@ -4824,10 +4910,10 @@ impl ToolRegistry {
     }
 
     async fn handle_send_invite_link(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let request = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let invitation = self
-            .client
+        let invitation = client
             .invitations
             .send_invite_link(request)
             .await
@@ -4838,10 +4924,10 @@ impl ToolRegistry {
     // ==================== BRANDING OPERATIONS ====================
 
     async fn handle_update_branding_settings(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let request = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let settings = self
-            .client
+        let settings = client
             .branding
             .update_branding_settings(request)
             .await
@@ -5161,6 +5247,7 @@ impl ToolRegistry {
     // ==================== APP RULES HANDLERS ====================
 
     async fn handle_list_app_rules(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let app_id = args
             .get("app_id")
             .and_then(|v| value_as_i64(v))
@@ -5174,12 +5261,13 @@ impl ToolRegistry {
             has_action_type: args.get("has_action_type").and_then(|v| v.as_str()).map(String::from),
         };
 
-        let rules = self.client.app_rules.list_rules(app_id, Some(params)).await
+        let rules = client.app_rules.list_rules(app_id, Some(params)).await
             .map_err(|e| anyhow!("Failed to list app rules: {}", e))?;
         Ok(serde_json::to_value(rules)?)
     }
 
     async fn handle_get_app_rule(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let app_id = args
             .get("app_id")
             .and_then(|v| value_as_i64(v))
@@ -5189,12 +5277,13 @@ impl ToolRegistry {
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("rule_id is required"))?;
 
-        let rule = self.client.app_rules.get_rule(app_id, rule_id).await
+        let rule = client.app_rules.get_rule(app_id, rule_id).await
             .map_err(|e| anyhow!("Failed to get app rule: {}", e))?;
         Ok(serde_json::to_value(rule)?)
     }
 
     async fn handle_create_app_rule(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let app_id = args
             .get("app_id")
             .and_then(|v| value_as_i64(v))
@@ -5203,12 +5292,13 @@ impl ToolRegistry {
         let request: crate::models::app_rules::CreateAppRuleRequest = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
 
-        let rule = self.client.app_rules.create_rule(app_id, request).await
+        let rule = client.app_rules.create_rule(app_id, request).await
             .map_err(|e| anyhow!("Failed to create app rule: {}", e))?;
         Ok(serde_json::to_value(rule)?)
     }
 
     async fn handle_update_app_rule(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let app_id = args
             .get("app_id")
             .and_then(|v| value_as_i64(v))
@@ -5221,12 +5311,13 @@ impl ToolRegistry {
         let request: crate::models::app_rules::UpdateAppRuleRequest = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
 
-        let rule = self.client.app_rules.update_rule(app_id, rule_id, request).await
+        let rule = client.app_rules.update_rule(app_id, rule_id, request).await
             .map_err(|e| anyhow!("Failed to update app rule: {}", e))?;
         Ok(serde_json::to_value(rule)?)
     }
 
     async fn handle_delete_app_rule(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let app_id = args
             .get("app_id")
             .and_then(|v| value_as_i64(v))
@@ -5236,34 +5327,37 @@ impl ToolRegistry {
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("rule_id is required"))?;
 
-        self.client.app_rules.delete_rule(app_id, rule_id).await
+        client.app_rules.delete_rule(app_id, rule_id).await
             .map_err(|e| anyhow!("Failed to delete app rule: {}", e))?;
         Ok(json!({"success": true, "message": "Rule deleted successfully"}))
     }
 
     async fn handle_list_app_rule_conditions(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let app_id = args
             .get("app_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("app_id is required"))?;
 
-        let conditions = self.client.app_rules.list_conditions(app_id).await
+        let conditions = client.app_rules.list_conditions(app_id).await
             .map_err(|e| anyhow!("Failed to list conditions: {}", e))?;
         Ok(serde_json::to_value(conditions)?)
     }
 
     async fn handle_list_app_rule_actions(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let app_id = args
             .get("app_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("app_id is required"))?;
 
-        let actions = self.client.app_rules.list_actions(app_id).await
+        let actions = client.app_rules.list_actions(app_id).await
             .map_err(|e| anyhow!("Failed to list actions: {}", e))?;
         Ok(serde_json::to_value(actions)?)
     }
 
     async fn handle_list_condition_operators(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let app_id = args
             .get("app_id")
             .and_then(|v| value_as_i64(v))
@@ -5273,12 +5367,13 @@ impl ToolRegistry {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("condition_value is required"))?;
 
-        let operators = self.client.app_rules.list_condition_operators(app_id, condition_value).await
+        let operators = client.app_rules.list_condition_operators(app_id, condition_value).await
             .map_err(|e| anyhow!("Failed to list condition operators: {}", e))?;
         Ok(serde_json::to_value(operators)?)
     }
 
     async fn handle_list_condition_values(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let app_id = args
             .get("app_id")
             .and_then(|v| value_as_i64(v))
@@ -5288,12 +5383,13 @@ impl ToolRegistry {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("condition_value is required"))?;
 
-        let values = self.client.app_rules.list_condition_values(app_id, condition_value).await
+        let values = client.app_rules.list_condition_values(app_id, condition_value).await
             .map_err(|e| anyhow!("Failed to list condition values: {}", e))?;
         Ok(serde_json::to_value(values)?)
     }
 
     async fn handle_list_action_values(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let app_id = args
             .get("app_id")
             .and_then(|v| value_as_i64(v))
@@ -5303,12 +5399,13 @@ impl ToolRegistry {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("action_value is required"))?;
 
-        let values = self.client.app_rules.list_action_values(app_id, action_value).await
+        let values = client.app_rules.list_action_values(app_id, action_value).await
             .map_err(|e| anyhow!("Failed to list action values: {}", e))?;
         Ok(serde_json::to_value(values)?)
     }
 
     async fn handle_sort_app_rules(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let app_id = args
             .get("app_id")
             .and_then(|v| value_as_i64(v))
@@ -5320,7 +5417,7 @@ impl ToolRegistry {
             .ok_or_else(|| anyhow!("rule_ids array is required"))?;
 
         let request = crate::models::app_rules::SortRulesRequest { rule_ids };
-        let sorted_ids = self.client.app_rules.sort_rules(app_id, request).await
+        let sorted_ids = client.app_rules.sort_rules(app_id, request).await
             .map_err(|e| anyhow!("Failed to sort rules: {}", e))?;
         Ok(json!({"success": true, "rule_ids": sorted_ids}))
     }
@@ -5534,16 +5631,18 @@ impl ToolRegistry {
     // ==================== MESSAGE TEMPLATE HANDLERS ====================
 
     async fn handle_list_message_templates(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let brand_id = args
             .get("brand_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("brand_id is required"))?;
-        let templates = self.client.branding.list_message_templates(brand_id).await
+        let templates = client.branding.list_message_templates(brand_id).await
             .map_err(|e| anyhow!("Failed to list message templates: {}", e))?;
         Ok(serde_json::to_value(templates)?)
     }
 
     async fn handle_get_message_template(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let brand_id = args
             .get("brand_id")
             .and_then(|v| value_as_i64(v))
@@ -5552,12 +5651,13 @@ impl ToolRegistry {
             .get("template_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("template_id is required"))?;
-        let template = self.client.branding.get_message_template(brand_id, template_id).await
+        let template = client.branding.get_message_template(brand_id, template_id).await
             .map_err(|e| anyhow!("Failed to get message template: {}", e))?;
         Ok(serde_json::to_value(template)?)
     }
 
     async fn handle_get_template_by_type(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let brand_id = args
             .get("brand_id")
             .and_then(|v| value_as_i64(v))
@@ -5566,12 +5666,13 @@ impl ToolRegistry {
             .get("template_type")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("template_type is required"))?;
-        let template = self.client.branding.get_template_by_type(brand_id, template_type).await
+        let template = client.branding.get_template_by_type(brand_id, template_type).await
             .map_err(|e| anyhow!("Failed to get template by type: {}", e))?;
         Ok(serde_json::to_value(template)?)
     }
 
     async fn handle_get_template_by_locale(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let brand_id = args
             .get("brand_id")
             .and_then(|v| value_as_i64(v))
@@ -5584,24 +5685,26 @@ impl ToolRegistry {
             .get("locale")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("locale is required"))?;
-        let template = self.client.branding.get_template_by_locale(brand_id, template_type, locale).await
+        let template = client.branding.get_template_by_locale(brand_id, template_type, locale).await
             .map_err(|e| anyhow!("Failed to get template by locale: {}", e))?;
         Ok(serde_json::to_value(template)?)
     }
 
     async fn handle_create_message_template(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let brand_id = args
             .get("brand_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("brand_id is required"))?;
         let request: crate::models::branding::CreateMessageTemplateRequest = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let template = self.client.branding.create_message_template(brand_id, request).await
+        let template = client.branding.create_message_template(brand_id, request).await
             .map_err(|e| anyhow!("Failed to create message template: {}", e))?;
         Ok(serde_json::to_value(template)?)
     }
 
     async fn handle_update_message_template(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let brand_id = args
             .get("brand_id")
             .and_then(|v| value_as_i64(v))
@@ -5612,12 +5715,13 @@ impl ToolRegistry {
             .ok_or_else(|| anyhow!("template_id is required"))?;
         let request: crate::models::branding::UpdateMessageTemplateRequest = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let template = self.client.branding.update_message_template(brand_id, template_id, request).await
+        let template = client.branding.update_message_template(brand_id, template_id, request).await
             .map_err(|e| anyhow!("Failed to update message template: {}", e))?;
         Ok(serde_json::to_value(template)?)
     }
 
     async fn handle_update_template_by_locale(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let brand_id = args
             .get("brand_id")
             .and_then(|v| value_as_i64(v))
@@ -5632,12 +5736,13 @@ impl ToolRegistry {
             .ok_or_else(|| anyhow!("locale is required"))?;
         let request: crate::models::branding::UpdateMessageTemplateRequest = serde_json::from_value(args.clone())
             .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let template = self.client.branding.update_template_by_locale(brand_id, template_type, locale, request).await
+        let template = client.branding.update_template_by_locale(brand_id, template_type, locale, request).await
             .map_err(|e| anyhow!("Failed to update template by locale: {}", e))?;
         Ok(serde_json::to_value(template)?)
     }
 
     async fn handle_delete_message_template(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let brand_id = args
             .get("brand_id")
             .and_then(|v| value_as_i64(v))
@@ -5646,7 +5751,7 @@ impl ToolRegistry {
             .get("template_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("template_id is required"))?;
-        self.client.branding.delete_message_template(brand_id, template_id).await
+        client.branding.delete_message_template(brand_id, template_id).await
             .map_err(|e| anyhow!("Failed to delete message template: {}", e))?;
         Ok(json!({"success": true, "message": "Template deleted successfully"}))
     }
@@ -5830,32 +5935,36 @@ impl ToolRegistry {
 
     // ==================== SELF-REGISTRATION HANDLERS ====================
 
-    async fn handle_list_self_registration_profiles(&self) -> Result<Value> {
-        let profiles = self.client.self_registration.list_profiles().await
+    async fn handle_list_self_registration_profiles(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
+        let profiles = client.self_registration.list_profiles().await
             .map_err(|e| anyhow!("Failed to list self-registration profiles: {}", e))?;
         Ok(serde_json::to_value(profiles)?)
     }
 
     async fn handle_get_self_registration_profile(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let profile_id = args
             .get("profile_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("profile_id is required"))?;
-        let profile = self.client.self_registration.get_profile(profile_id).await
+        let profile = client.self_registration.get_profile(profile_id).await
             .map_err(|e| anyhow!("Failed to get profile: {}", e))?;
         Ok(serde_json::to_value(profile)?)
     }
 
     async fn handle_create_self_registration_profile(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let request: crate::models::self_registration::CreateSelfRegistrationProfileRequest =
             serde_json::from_value(args.clone())
                 .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let profile = self.client.self_registration.create_profile(request).await
+        let profile = client.self_registration.create_profile(request).await
             .map_err(|e| anyhow!("Failed to create profile: {}", e))?;
         Ok(serde_json::to_value(profile)?)
     }
 
     async fn handle_update_self_registration_profile(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let profile_id = args
             .get("profile_id")
             .and_then(|v| value_as_i64(v))
@@ -5863,32 +5972,35 @@ impl ToolRegistry {
         let request: crate::models::self_registration::UpdateSelfRegistrationProfileRequest =
             serde_json::from_value(args.clone())
                 .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let profile = self.client.self_registration.update_profile(profile_id, request).await
+        let profile = client.self_registration.update_profile(profile_id, request).await
             .map_err(|e| anyhow!("Failed to update profile: {}", e))?;
         Ok(serde_json::to_value(profile)?)
     }
 
     async fn handle_delete_self_registration_profile(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let profile_id = args
             .get("profile_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("profile_id is required"))?;
-        self.client.self_registration.delete_profile(profile_id).await
+        client.self_registration.delete_profile(profile_id).await
             .map_err(|e| anyhow!("Failed to delete profile: {}", e))?;
         Ok(json!({"success": true, "message": "Profile deleted successfully"}))
     }
 
     async fn handle_list_registrations(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let profile_id = args
             .get("profile_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("profile_id is required"))?;
-        let registrations = self.client.self_registration.list_registrations(profile_id).await
+        let registrations = client.self_registration.list_registrations(profile_id).await
             .map_err(|e| anyhow!("Failed to list registrations: {}", e))?;
         Ok(serde_json::to_value(registrations)?)
     }
 
     async fn handle_approve_registration(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let profile_id = args
             .get("profile_id")
             .and_then(|v| value_as_i64(v))
@@ -5900,7 +6012,7 @@ impl ToolRegistry {
         let request: crate::models::self_registration::ApproveRegistrationRequest =
             serde_json::from_value(args.clone())
                 .map_err(|e| anyhow!("Invalid request: {}", e))?;
-        let registration = self.client.self_registration.approve_registration(profile_id, registration_id, request).await
+        let registration = client.self_registration.approve_registration(profile_id, registration_id, request).await
             .map_err(|e| anyhow!("Failed to approve/reject registration: {}", e))?;
         Ok(serde_json::to_value(registration)?)
     }
@@ -5984,23 +6096,26 @@ impl ToolRegistry {
 
     // ==================== REPORTS HANDLERS ====================
 
-    async fn handle_list_reports(&self) -> Result<Value> {
-        let reports = self.client.reports.list_reports().await
+    async fn handle_list_reports(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
+        let reports = client.reports.list_reports().await
             .map_err(|e| anyhow!("Failed to list reports: {}", e))?;
         Ok(serde_json::to_value(reports)?)
     }
 
     async fn handle_get_report(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let report_id = args
             .get("report_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("report_id is required"))?;
-        let report = self.client.reports.get_report(report_id).await
+        let report = client.reports.get_report(report_id).await
             .map_err(|e| anyhow!("Failed to get report: {}", e))?;
         Ok(serde_json::to_value(report)?)
     }
 
     async fn handle_run_report(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let report_id = args
             .get("report_id")
             .and_then(|v| value_as_i64(v))
@@ -6011,12 +6126,13 @@ impl ToolRegistry {
             } else {
                 None
             };
-        let job = self.client.reports.run_report(report_id, request).await
+        let job = client.reports.run_report(report_id, request).await
             .map_err(|e| anyhow!("Failed to run report: {}", e))?;
         Ok(serde_json::to_value(job)?)
     }
 
     async fn handle_get_report_results(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let report_id = args
             .get("report_id")
             .and_then(|v| value_as_i64(v))
@@ -6025,7 +6141,7 @@ impl ToolRegistry {
             .get("job_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("job_id is required"))?;
-        let job = self.client.reports.get_report_results(report_id, job_id).await
+        let job = client.reports.get_report_results(report_id, job_id).await
             .map_err(|e| anyhow!("Failed to get report results: {}", e))?;
         Ok(serde_json::to_value(job)?)
     }
@@ -6112,6 +6228,7 @@ impl ToolRegistry {
     }
 
     async fn handle_create_session_login_token(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let username_or_email = args
             .get("username_or_email")
             .and_then(|v| v.as_str())
@@ -6135,12 +6252,13 @@ impl ToolRegistry {
             ip_address,
         };
 
-        let response = self.client.login.create_session_login_token(request).await
+        let response = client.login.create_session_login_token(request).await
             .map_err(|e| anyhow!("Failed to create session login token: {}", e))?;
         Ok(serde_json::to_value(response)?)
     }
 
     async fn handle_verify_factor_login(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let state_token = args
             .get("state_token")
             .and_then(|v| v.as_str())
@@ -6156,12 +6274,13 @@ impl ToolRegistry {
             do_not_notify,
         };
 
-        let response = self.client.login.verify_factor_login(request).await
+        let response = client.login.verify_factor_login(request).await
             .map_err(|e| anyhow!("Failed to verify factor: {}", e))?;
         Ok(serde_json::to_value(response)?)
     }
 
     async fn handle_create_session(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let session_token = args
             .get("session_token")
             .and_then(|v| v.as_str())
@@ -6171,7 +6290,7 @@ impl ToolRegistry {
             session_token: session_token.to_string(),
         };
 
-        let response = self.client.login.create_session(request).await
+        let response = client.login.create_session(request).await
             .map_err(|e| anyhow!("Failed to create session: {}", e))?;
         Ok(serde_json::to_value(response)?)
     }
@@ -6207,18 +6326,20 @@ impl ToolRegistry {
         })
     }
 
-    async fn handle_list_connectors(&self) -> Result<Value> {
-        let connectors = self.client.connectors.list_connectors().await
+    async fn handle_list_connectors(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
+        let connectors = client.connectors.list_connectors().await
             .map_err(|e| anyhow!("Failed to list connectors: {}", e))?;
         Ok(serde_json::to_value(connectors)?)
     }
 
     async fn handle_get_connector(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let connector_id = args
             .get("connector_id")
             .and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("connector_id is required"))?;
-        let connector = self.client.connectors.get_connector(connector_id).await
+        let connector = client.connectors.get_connector(connector_id).await
             .map_err(|e| anyhow!("Failed to get connector: {}", e))?;
         Ok(serde_json::to_value(connector)?)
     }
@@ -6272,6 +6393,7 @@ impl ToolRegistry {
     }
 
     async fn handle_generate_mfa_token(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let user_id = args
             .get("user_id")
             .and_then(|v| value_as_i64(v))
@@ -6284,12 +6406,13 @@ impl ToolRegistry {
             reusable,
         };
 
-        let token = self.client.mfa.generate_mfa_token(user_id, request).await
+        let token = client.mfa.generate_mfa_token(user_id, request).await
             .map_err(|e| anyhow!("Failed to generate MFA token: {}", e))?;
         Ok(serde_json::to_value(token)?)
     }
 
     async fn handle_verify_mfa_token(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let user_id = args
             .get("user_id")
             .and_then(|v| value_as_i64(v))
@@ -6303,7 +6426,7 @@ impl ToolRegistry {
             mfa_token: mfa_token.to_string(),
         };
 
-        let response = self.client.mfa.verify_mfa_token(user_id, request).await
+        let response = client.mfa.verify_mfa_token(user_id, request).await
             .map_err(|e| anyhow!("Failed to verify MFA token: {}", e))?;
         Ok(serde_json::to_value(response)?)
     }
@@ -6331,14 +6454,16 @@ impl ToolRegistry {
         })
     }
 
-    async fn handle_get_rate_limit_status(&self) -> Result<Value> {
-        let result = self.client.rate_limits.get_rate_limit_status().await
+    async fn handle_get_rate_limit_status(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
+        let result = client.rate_limits.get_rate_limit_status().await
             .map_err(|e| anyhow!("Failed to get rate limit status: {}", e))?;
         Ok(serde_json::to_value(result)?)
     }
 
-    async fn handle_get_rate_limits(&self) -> Result<Value> {
-        let result = self.client.rate_limits.get_rate_limits().await
+    async fn handle_get_rate_limits(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
+        let result = client.rate_limits.get_rate_limits().await
             .map_err(|e| anyhow!("Failed to get rate limits: {}", e))?;
         Ok(serde_json::to_value(result)?)
     }
@@ -6414,13 +6539,15 @@ impl ToolRegistry {
         })
     }
 
-    async fn handle_get_account_settings(&self) -> Result<Value> {
-        let result = self.client.account.get_account_settings().await
+    async fn handle_get_account_settings(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
+        let result = client.account.get_account_settings().await
             .map_err(|e| anyhow!("Failed to get account settings: {}", e))?;
         Ok(serde_json::to_value(result)?)
     }
 
     async fn handle_update_account_settings(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let request = crate::models::account::UpdateAccountSettingsRequest {
             default_locale: args.get("default_locale").and_then(|v| v.as_str()).map(|s| s.to_string()),
             default_timezone: args.get("default_timezone").and_then(|v| v.as_str()).map(|s| s.to_string()),
@@ -6434,21 +6561,23 @@ impl ToolRegistry {
                 arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
             ),
         };
-        let result = self.client.account.update_account_settings(request).await
+        let result = client.account.update_account_settings(request).await
             .map_err(|e| anyhow!("Failed to update account settings: {}", e))?;
         Ok(serde_json::to_value(result)?)
     }
 
-    async fn handle_get_account_features(&self) -> Result<Value> {
-        let result = self.client.account.get_account_features().await
+    async fn handle_get_account_features(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
+        let result = client.account.get_account_features().await
             .map_err(|e| anyhow!("Failed to get account features: {}", e))?;
         Ok(serde_json::to_value(result)?)
     }
 
     async fn handle_get_account_usage(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let start_date = args.get("start_date").and_then(|v| v.as_str()).map(|s| s.to_string());
         let end_date = args.get("end_date").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let result = self.client.account.get_account_usage(start_date, end_date).await
+        let result = client.account.get_account_usage(start_date, end_date).await
             .map_err(|e| anyhow!("Failed to get account usage: {}", e))?;
         Ok(serde_json::to_value(result)?)
     }
@@ -6584,21 +6713,24 @@ impl ToolRegistry {
         })
     }
 
-    async fn handle_list_password_policies(&self) -> Result<Value> {
-        let result = self.client.password_policies.list_password_policies().await
+    async fn handle_list_password_policies(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
+        let result = client.password_policies.list_password_policies().await
             .map_err(|e| anyhow!("Failed to list password policies: {}", e))?;
         Ok(serde_json::to_value(result)?)
     }
 
     async fn handle_get_password_policy(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let policy_id = args.get("policy_id").and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("policy_id is required"))?;
-        let result = self.client.password_policies.get_password_policy(policy_id).await
+        let result = client.password_policies.get_password_policy(policy_id).await
             .map_err(|e| anyhow!("Failed to get password policy: {}", e))?;
         Ok(serde_json::to_value(result)?)
     }
 
     async fn handle_create_password_policy(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let name = args.get("name").and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("name is required"))?;
         let request = crate::models::password_policies::CreatePasswordPolicyRequest {
@@ -6613,12 +6745,13 @@ impl ToolRegistry {
             max_failed_attempts: args.get("max_failed_attempts").and_then(|v| value_as_i64(v)).map(|v| v as i32),
             lockout_duration_minutes: args.get("lockout_duration_minutes").and_then(|v| value_as_i64(v)).map(|v| v as i32),
         };
-        let result = self.client.password_policies.create_password_policy(request).await
+        let result = client.password_policies.create_password_policy(request).await
             .map_err(|e| anyhow!("Failed to create password policy: {}", e))?;
         Ok(serde_json::to_value(result)?)
     }
 
     async fn handle_update_password_policy(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let policy_id = args.get("policy_id").and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("policy_id is required"))?;
         let request = crate::models::password_policies::UpdatePasswordPolicyRequest {
@@ -6633,7 +6766,7 @@ impl ToolRegistry {
             max_failed_attempts: args.get("max_failed_attempts").and_then(|v| value_as_i64(v)).map(|v| v as i32),
             lockout_duration_minutes: args.get("lockout_duration_minutes").and_then(|v| value_as_i64(v)).map(|v| v as i32),
         };
-        let result = self.client.password_policies.update_password_policy(policy_id, request).await
+        let result = client.password_policies.update_password_policy(policy_id, request).await
             .map_err(|e| anyhow!("Failed to update password policy: {}", e))?;
         Ok(serde_json::to_value(result)?)
     }
@@ -6709,34 +6842,38 @@ impl ToolRegistry {
         })
     }
 
-    async fn handle_list_certificates(&self) -> Result<Value> {
-        let result = self.client.certificates.list_certificates().await
+    async fn handle_list_certificates(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
+        let result = client.certificates.list_certificates().await
             .map_err(|e| anyhow!("Failed to list certificates: {}", e))?;
         Ok(serde_json::to_value(result)?)
     }
 
     async fn handle_get_certificate(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let cert_id = args.get("cert_id").and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("cert_id is required"))?;
-        let result = self.client.certificates.get_certificate(cert_id).await
+        let result = client.certificates.get_certificate(cert_id).await
             .map_err(|e| anyhow!("Failed to get certificate: {}", e))?;
         Ok(serde_json::to_value(result)?)
     }
 
     async fn handle_generate_certificate(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let request = crate::models::certificates::GenerateCertificateRequest {
             name: args.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()),
             validity_years: args.get("validity_years").and_then(|v| value_as_i64(v)).map(|v| v as i32),
         };
-        let result = self.client.certificates.generate_certificate(request).await
+        let result = client.certificates.generate_certificate(request).await
             .map_err(|e| anyhow!("Failed to generate certificate: {}", e))?;
         Ok(serde_json::to_value(result)?)
     }
 
     async fn handle_renew_certificate(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let cert_id = args.get("cert_id").and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("cert_id is required"))?;
-        let result = self.client.certificates.renew_certificate(cert_id).await
+        let result = client.certificates.renew_certificate(cert_id).await
             .map_err(|e| anyhow!("Failed to renew certificate: {}", e))?;
         Ok(serde_json::to_value(result)?)
     }
@@ -6855,26 +6992,29 @@ impl ToolRegistry {
     }
 
     async fn handle_list_devices(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let query = crate::models::device_trust::DeviceQuery {
             user_id: args.get("user_id").and_then(|v| value_as_i64(v)),
             device_type: args.get("device_type").and_then(|v| v.as_str()).map(|s| s.to_string()),
             limit: args.get("limit").and_then(|v| value_as_i64(v)).map(|v| v as i32),
             page: args.get("page").and_then(|v| value_as_i64(v)).map(|v| v as i32),
         };
-        let result = self.client.device_trust.list_devices(query).await
+        let result = client.device_trust.list_devices(query).await
             .map_err(|e| anyhow!("Failed to list devices: {}", e))?;
         Ok(serde_json::to_value(result)?)
     }
 
     async fn handle_get_device(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let device_id = args.get("device_id").and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("device_id is required"))?;
-        let result = self.client.device_trust.get_device(device_id).await
+        let result = client.device_trust.get_device(device_id).await
             .map_err(|e| anyhow!("Failed to get device: {}", e))?;
         Ok(serde_json::to_value(result)?)
     }
 
     async fn handle_register_device(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let user_id = args.get("user_id").and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("user_id is required"))?;
         let device_name = args.get("device_name").and_then(|v| v.as_str())
@@ -6886,27 +7026,29 @@ impl ToolRegistry {
             platform: args.get("platform").and_then(|v| v.as_str()).map(|s| s.to_string()),
             browser: args.get("browser").and_then(|v| v.as_str()).map(|s| s.to_string()),
         };
-        let result = self.client.device_trust.register_device(request).await
+        let result = client.device_trust.register_device(request).await
             .map_err(|e| anyhow!("Failed to register device: {}", e))?;
         Ok(serde_json::to_value(result)?)
     }
 
     async fn handle_update_device(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let device_id = args.get("device_id").and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("device_id is required"))?;
         let request = crate::models::device_trust::UpdateDeviceRequest {
             device_name: args.get("device_name").and_then(|v| v.as_str()).map(|s| s.to_string()),
             trust_level: args.get("trust_level").and_then(|v| v.as_str()).map(|s| s.to_string()),
         };
-        let result = self.client.device_trust.update_device(device_id, request).await
+        let result = client.device_trust.update_device(device_id, request).await
             .map_err(|e| anyhow!("Failed to update device: {}", e))?;
         Ok(serde_json::to_value(result)?)
     }
 
     async fn handle_delete_device(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let device_id = args.get("device_id").and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("device_id is required"))?;
-        self.client.device_trust.delete_device(device_id).await
+        client.device_trust.delete_device(device_id).await
             .map_err(|e| anyhow!("Failed to delete device: {}", e))?;
         Ok(json!({"success": true}))
     }
@@ -7019,21 +7161,24 @@ impl ToolRegistry {
         })
     }
 
-    async fn handle_list_login_pages(&self) -> Result<Value> {
-        let result = self.client.login_pages.list_login_pages().await
+    async fn handle_list_login_pages(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
+        let result = client.login_pages.list_login_pages().await
             .map_err(|e| anyhow!("Failed to list login pages: {}", e))?;
         Ok(serde_json::to_value(result)?)
     }
 
     async fn handle_get_login_page(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let page_id = args.get("page_id").and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("page_id is required"))?;
-        let result = self.client.login_pages.get_login_page(page_id).await
+        let result = client.login_pages.get_login_page(page_id).await
             .map_err(|e| anyhow!("Failed to get login page: {}", e))?;
         Ok(serde_json::to_value(result)?)
     }
 
     async fn handle_create_login_page(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let name = args.get("name").and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("name is required"))?;
         let request = crate::models::login_pages::CreateLoginPageRequest {
@@ -7044,12 +7189,13 @@ impl ToolRegistry {
             subdomain: args.get("subdomain").and_then(|v| v.as_str()).map(|s| s.to_string()),
             enabled: args.get("enabled").and_then(|v| v.as_bool()),
         };
-        let result = self.client.login_pages.create_login_page(request).await
+        let result = client.login_pages.create_login_page(request).await
             .map_err(|e| anyhow!("Failed to create login page: {}", e))?;
         Ok(serde_json::to_value(result)?)
     }
 
     async fn handle_update_login_page(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let page_id = args.get("page_id").and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("page_id is required"))?;
         let request = crate::models::login_pages::UpdateLoginPageRequest {
@@ -7060,13 +7206,14 @@ impl ToolRegistry {
             subdomain: args.get("subdomain").and_then(|v| v.as_str()).map(|s| s.to_string()),
             enabled: args.get("enabled").and_then(|v| v.as_bool()),
         };
-        let result = self.client.login_pages.update_login_page(page_id, request).await
+        let result = client.login_pages.update_login_page(page_id, request).await
             .map_err(|e| anyhow!("Failed to update login page: {}", e))?;
         Ok(serde_json::to_value(result)?)
     }
 
     async fn handle_delete_login_page(&self, args: &Value) -> Result<Value> {
-        self.client.login_pages.delete_login_page(
+        let client = self.resolve_client(args)?;
+        client.login_pages.delete_login_page(
             args.get("page_id").and_then(|v| value_as_i64(v))
                 .ok_or_else(|| anyhow!("page_id is required"))?
         ).await.map_err(|e| anyhow!("Failed to delete login page: {}", e))?;
@@ -7240,21 +7387,24 @@ impl ToolRegistry {
         })
     }
 
-    async fn handle_list_trusted_idps(&self) -> Result<Value> {
-        let result = self.client.trusted_idps.list_trusted_idps().await
+    async fn handle_list_trusted_idps(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
+        let result = client.trusted_idps.list_trusted_idps().await
             .map_err(|e| anyhow!("Failed to list trusted IDPs: {}", e))?;
         Ok(serde_json::to_value(result)?)
     }
 
     async fn handle_get_trusted_idp(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let idp_id = args.get("idp_id").and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("idp_id is required"))?;
-        let result = self.client.trusted_idps.get_trusted_idp(idp_id).await
+        let result = client.trusted_idps.get_trusted_idp(idp_id).await
             .map_err(|e| anyhow!("Failed to get trusted IDP: {}", e))?;
         Ok(serde_json::to_value(result)?)
     }
 
     async fn handle_create_trusted_idp(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let name = args.get("name").and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("name is required"))?;
         let idp_type = args.get("idp_type").and_then(|v| v.as_str())
@@ -7272,12 +7422,13 @@ impl ToolRegistry {
             authorization_endpoint: args.get("authorization_endpoint").and_then(|v| v.as_str()).map(|s| s.to_string()),
             token_endpoint: args.get("token_endpoint").and_then(|v| v.as_str()).map(|s| s.to_string()),
         };
-        let result = self.client.trusted_idps.create_trusted_idp(request).await
+        let result = client.trusted_idps.create_trusted_idp(request).await
             .map_err(|e| anyhow!("Failed to create trusted IDP: {}", e))?;
         Ok(serde_json::to_value(result)?)
     }
 
     async fn handle_update_trusted_idp(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let idp_id = args.get("idp_id").and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("idp_id is required"))?;
         let request = crate::models::trusted_idps::UpdateTrustedIdpRequest {
@@ -7288,13 +7439,14 @@ impl ToolRegistry {
             slo_endpoint: args.get("slo_endpoint").and_then(|v| v.as_str()).map(|s| s.to_string()),
             certificate: args.get("certificate").and_then(|v| v.as_str()).map(|s| s.to_string()),
         };
-        let result = self.client.trusted_idps.update_trusted_idp(idp_id, request).await
+        let result = client.trusted_idps.update_trusted_idp(idp_id, request).await
             .map_err(|e| anyhow!("Failed to update trusted IDP: {}", e))?;
         Ok(serde_json::to_value(result)?)
     }
 
     async fn handle_delete_trusted_idp(&self, args: &Value) -> Result<Value> {
-        self.client.trusted_idps.delete_trusted_idp(
+        let client = self.resolve_client(args)?;
+        client.trusted_idps.delete_trusted_idp(
             args.get("idp_id").and_then(|v| value_as_i64(v))
                 .ok_or_else(|| anyhow!("idp_id is required"))?
         ).await.map_err(|e| anyhow!("Failed to delete trusted IDP: {}", e))?;
@@ -7302,14 +7454,16 @@ impl ToolRegistry {
     }
 
     async fn handle_get_trusted_idp_metadata(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let idp_id = args.get("idp_id").and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("idp_id is required"))?;
-        let result = self.client.trusted_idps.get_trusted_idp_metadata(idp_id).await
+        let result = client.trusted_idps.get_trusted_idp_metadata(idp_id).await
             .map_err(|e| anyhow!("Failed to get trusted IDP metadata: {}", e))?;
         Ok(serde_json::to_value(result)?)
     }
 
     async fn handle_update_trusted_idp_metadata(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let idp_id = args.get("idp_id").and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("idp_id is required"))?;
         let metadata = args.get("metadata").and_then(|v| v.as_str())
@@ -7317,15 +7471,16 @@ impl ToolRegistry {
         let request = crate::models::trusted_idps::UpdateTrustedIdpMetadataRequest {
             metadata: metadata.to_string(),
         };
-        let result = self.client.trusted_idps.update_trusted_idp_metadata(idp_id, request).await
+        let result = client.trusted_idps.update_trusted_idp_metadata(idp_id, request).await
             .map_err(|e| anyhow!("Failed to update trusted IDP metadata: {}", e))?;
         Ok(serde_json::to_value(result)?)
     }
 
     async fn handle_get_trusted_idp_issuer(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let idp_id = args.get("idp_id").and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("idp_id is required"))?;
-        let result = self.client.trusted_idps.get_trusted_idp_issuer(idp_id).await
+        let result = client.trusted_idps.get_trusted_idp_issuer(idp_id).await
             .map_err(|e| anyhow!("Failed to get trusted IDP issuer: {}", e))?;
         Ok(serde_json::to_value(result)?)
     }
@@ -7492,14 +7647,16 @@ impl ToolRegistry {
     }
 
     async fn handle_get_role_apps(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let role_id = args.get("role_id").and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("role_id is required"))?;
-        let result = self.client.roles.get_role_apps(role_id).await
+        let result = client.roles.get_role_apps(role_id).await
             .map_err(|e| anyhow!("Failed to get role apps: {}", e))?;
         Ok(serde_json::to_value(result)?)
     }
 
     async fn handle_set_role_apps(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let role_id = args.get("role_id").and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("role_id is required"))?;
         let app_id_array = args.get("app_ids").and_then(|v| v.as_array())
@@ -7508,28 +7665,31 @@ impl ToolRegistry {
             .filter_map(|v| value_as_i64(v))
             .collect();
         let request = crate::models::roles::SetRoleAppsRequest { app_id_array };
-        let result = self.client.roles.set_role_apps(role_id, request).await
+        let result = client.roles.set_role_apps(role_id, request).await
             .map_err(|e| anyhow!("Failed to set role apps: {}", e))?;
         Ok(serde_json::to_value(result)?)
     }
 
     async fn handle_get_role_users(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let role_id = args.get("role_id").and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("role_id is required"))?;
-        let result = self.client.roles.get_role_users(role_id).await
+        let result = client.roles.get_role_users(role_id).await
             .map_err(|e| anyhow!("Failed to get role users: {}", e))?;
         Ok(serde_json::to_value(result)?)
     }
 
     async fn handle_get_role_admins(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let role_id = args.get("role_id").and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("role_id is required"))?;
-        let result = self.client.roles.get_role_admins(role_id).await
+        let result = client.roles.get_role_admins(role_id).await
             .map_err(|e| anyhow!("Failed to get role admins: {}", e))?;
         Ok(serde_json::to_value(result)?)
     }
 
     async fn handle_add_role_admins(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let role_id = args.get("role_id").and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("role_id is required"))?;
         let admin_id_array = args.get("admin_ids").and_then(|v| v.as_array())
@@ -7538,22 +7698,24 @@ impl ToolRegistry {
             .filter_map(|v| value_as_i64(v))
             .collect();
         let request = crate::models::roles::AddRoleAdminsRequest { admin_id_array };
-        self.client.roles.add_role_admins(role_id, request).await
+        client.roles.add_role_admins(role_id, request).await
             .map_err(|e| anyhow!("Failed to add role admins: {}", e))?;
         Ok(json!({"success": true}))
     }
 
     async fn handle_remove_role_admin(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let role_id = args.get("role_id").and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("role_id is required"))?;
         let admin_id = args.get("admin_id").and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("admin_id is required"))?;
-        self.client.roles.remove_role_admin(role_id, admin_id).await
+        client.roles.remove_role_admin(role_id, admin_id).await
             .map_err(|e| anyhow!("Failed to remove role admin: {}", e))?;
         Ok(json!({"success": true}))
     }
 
     async fn handle_assign_roles_to_user(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let user_id = args.get("user_id").and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("user_id is required"))?;
         let role_id_array = args.get("role_ids").and_then(|v| v.as_array())
@@ -7562,12 +7724,13 @@ impl ToolRegistry {
             .filter_map(|v| value_as_i64(v))
             .collect();
         let request = crate::models::roles::RoleIdsRequest { role_id_array };
-        self.client.roles.assign_roles_to_user(user_id, request).await
+        client.roles.assign_roles_to_user(user_id, request).await
             .map_err(|e| anyhow!("Failed to assign roles to user: {}", e))?;
         Ok(json!({"success": true}))
     }
 
     async fn handle_remove_roles_from_user(&self, args: &Value) -> Result<Value> {
+        let client = self.resolve_client(args)?;
         let user_id = args.get("user_id").and_then(|v| value_as_i64(v))
             .ok_or_else(|| anyhow!("user_id is required"))?;
         let role_id_array = args.get("role_ids").and_then(|v| v.as_array())
@@ -7576,8 +7739,29 @@ impl ToolRegistry {
             .filter_map(|v| value_as_i64(v))
             .collect();
         let request = crate::models::roles::RoleIdsRequest { role_id_array };
-        self.client.roles.remove_roles_from_user(user_id, request).await
+        client.roles.remove_roles_from_user(user_id, request).await
             .map_err(|e| anyhow!("Failed to remove roles from user: {}", e))?;
         Ok(json!({"success": true}))
     }
+
+    fn tool_list_tenants(&self) -> Value {
+        json!({
+            "name": "onelogin_list_tenants",
+            "description": "List all configured OneLogin tenants. Shows tenant name, subdomain, region, and which is the default. Use the tenant name as the 'tenant' parameter in other tools to target a specific tenant.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        })
+    }
+
+    async fn handle_list_tenants(&self) -> Result<Value> {
+        let info = self.tenant_manager.tenant_info();
+        Ok(json!({
+            "tenants": info,
+            "default_tenant": self.tenant_manager.default_tenant_name(),
+            "multi_tenant_mode": self.tenant_manager.is_multi_tenant()
+        }))
+    }
+
 }

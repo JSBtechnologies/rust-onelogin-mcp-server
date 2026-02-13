@@ -4,4 +4,5 @@ pub mod client;
 pub mod config;
 pub mod error;
 pub mod rate_limit;
+pub mod tenant_manager;
 pub mod tool_config;

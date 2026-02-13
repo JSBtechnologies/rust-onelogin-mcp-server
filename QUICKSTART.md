@@ -100,6 +100,42 @@ Call a tool (e.g., list users):
 }
 ```
 
+## Multi-Tenant Setup (Optional)
+
+To manage multiple OneLogin tenants from a single server instance, create a `tenants.json` file:
+
+| Platform | Default Location |
+|----------|------------------|
+| **macOS** | `~/Library/Application Support/onelogin-mcp/tenants.json` |
+| **Linux** | `~/.config/onelogin-mcp/tenants.json` |
+| **Windows** | `C:\Users\<User>\AppData\Roaming\onelogin-mcp\tenants.json` |
+
+```json
+{
+    "tenants": [
+        {
+            "name": "production",
+            "client_id": "your_prod_client_id",
+            "client_secret": "your_prod_client_secret",
+            "region": "us",
+            "subdomain": "mycompany",
+            "default": true
+        },
+        {
+            "name": "staging",
+            "client_id": "your_staging_client_id",
+            "client_secret": "your_staging_client_secret",
+            "region": "us",
+            "subdomain": "mycompany-staging"
+        }
+    ]
+}
+```
+
+When `tenants.json` is present, every tool accepts an optional `tenant` parameter. Omitting it uses the default tenant. The `.env` file is not required for credentials in multi-tenant mode.
+
+See [README.md](README.md#multi-tenant-configuration) for full details.
+
 ## Common Use Cases
 
 ### Create a User
@@ -174,9 +210,9 @@ Call a tool (e.g., list users):
 }
 ```
 
-## Available Tools (177)
+## Available Tools (154)
 
-The server exposes 177 tools across 28 API domains including Users, Apps, Roles, Groups, Smart Hooks, Vigilance/Risk, MFA, App Rules, Branding, Connectors, Events, Privileges, Reports, SAML, and more.
+The server exposes 154 tools across 28 API domains including Users, Apps, Roles, Groups, Smart Hooks, Vigilance/Risk, MFA, App Rules, Branding, Connectors, Events, Privileges, Reports, SAML, and more.
 
 See the [README](README.md#api-coverage) for the full API coverage table.
 
@@ -223,7 +259,7 @@ RUST_LOG=debug cargo run
 
 ## Next Steps
 
-1. **Explore Tools**: Use `tools/list` to see all 177 available tools
+1. **Explore Tools**: Use `tools/list` to see all 154 available tools
 2. **Read Documentation**: See [README.md](README.md) for full documentation
 3. **Integrate with Claude**: See [INTEGRATION.md](INTEGRATION.md) for Claude Desktop setup
 4. **Customize**: Modify source code for your specific needs
@@ -267,4 +303,4 @@ MIT License - See LICENSE file
 
 **You're all set!** 🚀
 
-The OneLogin MCP Server is now ready to use with complete API coverage across 28 domains and 177 tools.
+The OneLogin MCP Server is now ready to use with complete API coverage across 28 domains and 154 tools.

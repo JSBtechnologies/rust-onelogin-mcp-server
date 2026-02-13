@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use secrecy::Secret;
+use serde::Deserialize;
 use std::env;
 use std::path::PathBuf;
 
@@ -131,6 +132,123 @@ impl Config {
             format!("{}/api/2/{}", base, trimmed)
         }
     }
+
+    /// Load only shared operational settings from env vars, using placeholder credentials.
+    /// Used when tenants.json provides all tenant-specific credentials.
+    pub fn from_env_base() -> Result<Self> {
+        dotenv::dotenv().ok();
+
+        let cache_ttl_seconds = env::var("CACHE_TTL_SECONDS")
+            .unwrap_or_else(|_| "300".to_string())
+            .parse()
+            .context("Invalid CACHE_TTL_SECONDS")?;
+
+        let rate_limit_requests_per_second = env::var("RATE_LIMIT_RPS")
+            .unwrap_or_else(|_| "10".to_string())
+            .parse()
+            .context("Invalid RATE_LIMIT_RPS")?;
+
+        let enable_metrics = env::var("ENABLE_METRICS")
+            .unwrap_or_else(|_| "false".to_string())
+            .parse()
+            .unwrap_or(false);
+
+        let max_retries = env::var("MAX_RETRIES")
+            .unwrap_or_else(|_| "3".to_string())
+            .parse()
+            .context("Invalid MAX_RETRIES")?;
+
+        let retry_initial_delay_ms = env::var("RETRY_INITIAL_DELAY_MS")
+            .unwrap_or_else(|_| "100".to_string())
+            .parse()
+            .context("Invalid RETRY_INITIAL_DELAY_MS")?;
+
+        let retry_max_delay_ms = env::var("RETRY_MAX_DELAY_MS")
+            .unwrap_or_else(|_| "10000".to_string())
+            .parse()
+            .context("Invalid RETRY_MAX_DELAY_MS")?;
+
+        let tool_config_path = env::var("ONELOGIN_MCP_CONFIG")
+            .map(PathBuf::from)
+            .ok()
+            .or_else(|| dirs::config_dir().map(|d| d.join("onelogin-mcp").join("config.json")));
+
+        Ok(Config {
+            onelogin_client_id: String::new(),
+            onelogin_client_secret: Secret::new(String::new()),
+            onelogin_region: OneLoginRegion::US,
+            onelogin_subdomain: String::new(),
+            cache_ttl_seconds,
+            rate_limit_requests_per_second,
+            enable_metrics,
+            max_retries,
+            retry_initial_delay_ms,
+            retry_max_delay_ms,
+            tool_config_path,
+        })
+    }
+
+    /// Load multi-tenant configuration from file.
+    /// Checks ONELOGIN_TENANTS_CONFIG env var first, then default platform path.
+    pub fn load_tenants_file() -> Result<Option<TenantsConfigFile>> {
+        let path = env::var("ONELOGIN_TENANTS_CONFIG")
+            .map(PathBuf::from)
+            .ok()
+            .or_else(|| dirs::config_dir().map(|d| d.join("onelogin-mcp").join("tenants.json")));
+
+        match path {
+            Some(p) if p.exists() => {
+                let content = std::fs::read_to_string(&p)
+                    .with_context(|| format!("Failed to read tenants config: {}", p.display()))?;
+                let config: TenantsConfigFile = serde_json::from_str(&content)
+                    .with_context(|| format!("Failed to parse tenants config: {}", p.display()))?;
+                Ok(Some(config))
+            }
+            _ => Ok(None),
+        }
+    }
+}
+
+/// A single tenant's connection credentials for multi-tenant mode.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TenantEntry {
+    pub name: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub region: String,
+    pub subdomain: String,
+    #[serde(default)]
+    pub default: bool,
+}
+
+impl TenantEntry {
+    /// Convert this entry into a full Config, inheriting shared operational settings from the base.
+    pub fn to_config(&self, base: &Config) -> Result<Config> {
+        let region = match self.region.to_lowercase().as_str() {
+            "us" => OneLoginRegion::US,
+            "eu" => OneLoginRegion::EU,
+            _ => anyhow::bail!("Invalid region '{}' for tenant '{}'", self.region, self.name),
+        };
+        Ok(Config {
+            onelogin_client_id: self.client_id.clone(),
+            onelogin_client_secret: Secret::new(self.client_secret.clone()),
+            onelogin_region: region,
+            onelogin_subdomain: self.subdomain.clone(),
+            cache_ttl_seconds: base.cache_ttl_seconds,
+            rate_limit_requests_per_second: base.rate_limit_requests_per_second,
+            enable_metrics: base.enable_metrics,
+            max_retries: base.max_retries,
+            retry_initial_delay_ms: base.retry_initial_delay_ms,
+            retry_max_delay_ms: base.retry_max_delay_ms,
+            tool_config_path: base.tool_config_path.clone(),
+        })
+    }
+}
+
+/// Multi-tenant configuration file structure.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TenantsConfigFile {
+    pub tenants: Vec<TenantEntry>,
 }
 
 #[cfg(test)]

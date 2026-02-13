@@ -385,6 +385,13 @@ pub static TOOL_CATEGORIES: &[ToolCategory] = &[
         ],
         default_enabled: false,
     },
+    ToolCategory {
+        name: "tenant_management",
+        tools: &[
+            "onelogin_list_tenants",
+        ],
+        default_enabled: true,
+    },
 ];
 
 /// Main configuration file structure
